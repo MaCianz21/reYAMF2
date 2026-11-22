@@ -52,7 +52,10 @@ object UserService {
         log(TAG, "App uid: $appUid")
         log(TAG, "Register uid observer")
 
-        waitSystemService("activity")
+        if (!waitSystemService("activity")) {
+            log(TAG, "activity service never appeared, uid observer not registered")
+            return
+        }
         ActivityManagerApis.registerUidObserver(
             uidObserver,
             ActivityManagerHidden.UID_OBSERVER_ACTIVE,
@@ -61,9 +64,12 @@ object UserService {
         )
     }
 
-    private fun waitSystemService(name: String) {
-        while (ServiceManager.getService(name) == null) {
+    /** Waits for a system service with a bounded number of attempts. */
+    private fun waitSystemService(name: String, attempts: Int = 60): Boolean {
+        repeat(attempts) {
+            if (ServiceManager.getService(name) != null) return true
             Thread.sleep(1000)
         }
+        return ServiceManager.getService(name) != null
     }
 }

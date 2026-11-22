@@ -25,13 +25,13 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
-import com.github.kyuubiran.ezxhelper.utils.runOnMainThread
+import com.mja.reyamf.common.reflect.runOnMainThread
 import com.juanarton.batterysense.batterymonitorservice.ServiceState
 import com.juanarton.batterysense.batterymonitorservice.setServiceState
 import com.mja.reyamf.R
+import com.mja.reyamf.common.OneShotGuard
 import com.mja.reyamf.common.gson
 import com.mja.reyamf.common.model.AppInfo
-import com.mja.reyamf.common.runMain
 import com.mja.reyamf.databinding.SidebarMenuLayoutBinding
 import com.mja.reyamf.manager.adapter.SideBarAdapter
 import com.mja.reyamf.manager.adapter.VerticalSpaceItemDecoration
@@ -46,6 +46,7 @@ import com.mja.reyamf.xposed.utils.dpToPx
 import com.mja.reyamf.xposed.utils.vibratePhone
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -78,6 +79,8 @@ class SidebarMenuService() : LifecycleService() {
     private val showApp: LiveData<List<AppInfo>> = _showApp
 
     private var isServiceRunning = false
+    private val teardown = OneShotGuard()
+    private var sidebarAppsJob: Job? = null
 
     override fun onBind(intent: Intent): IBinder? {
         super.onBind(intent)
@@ -89,7 +92,11 @@ class SidebarMenuService() : LifecycleService() {
 
         if (!isServiceRunning) {
             isServiceRunning = true
-            initSidebar()
+            runCatching { initSidebar() }.onFailure {
+                Log.e(TAG, "Failed to start the sidebar menu", it)
+                isServiceRunning = false
+                stopSelf()
+            }
         }
     }
 
@@ -98,7 +105,8 @@ class SidebarMenuService() : LifecycleService() {
         val inflater = LayoutInflater.from(themedContext)
         binding = SidebarMenuLayoutBinding.inflate(inflater)
 
-        config = gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java)
+        config = runCatching { gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java) }
+            .getOrNull() ?: YAMFConfig()
 
         params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -163,10 +171,6 @@ class SidebarMenuService() : LifecycleService() {
 
     private fun handleSidebar() {
 
-        binding.ivExtraTool.setOnClickListener {
-            hideMenu()
-        }
-
         binding.cvSideBarMenu.post {
             if (config.sidebarPosition) {
                 binding.root.layoutDirection = View.LAYOUT_DIRECTION_RTL
@@ -185,10 +189,12 @@ class SidebarMenuService() : LifecycleService() {
         }
 
         binding.ibAppList.setOnClickListener {
-            runMain {
+            // Android 12+ can refuse the background service start; keep the menu usable then.
+            val started = runCatching {
                 startService(Intent(this@SidebarMenuService, AppListWindow::class.java))
-            }
-            hideMenu()
+                true
+            }.onFailure { Log.e(TAG, "cannot open the app list window", it) }.getOrDefault(false)
+            if (started) hideMenu()
         }
 
         binding.ibCurrentToWindow.setOnClickListener {
@@ -197,12 +203,8 @@ class SidebarMenuService() : LifecycleService() {
         }
 
         binding.ibKillSidebar.setOnClickListener {
-            try {
-                windowManager.removeView(binding.root)
-                stopSelf()
-            } catch (e: Exception) {
-                Log.d("reYAMF", "Sidebar killed")
-            }
+            detachWindow()
+            stopSelf()
             setServiceState(this, ServiceState.STOPPED)
         }
 
@@ -215,12 +217,12 @@ class SidebarMenuService() : LifecycleService() {
             when (rotation) {
                 Surface.ROTATION_0, Surface.ROTATION_180 -> {
                     params.y = config.portraitY
-                    windowManager.updateViewLayout(binding.root, params)
+                    updatePosition()
                     newOrientation = 0
                 }
                 Surface.ROTATION_90, Surface.ROTATION_270 -> {
                     params.y = config.landscapeY
-                    windowManager.updateViewLayout(binding.root, params)
+                    updatePosition()
                     newOrientation = 1
                 }
             }
@@ -290,6 +292,9 @@ class SidebarMenuService() : LifecycleService() {
     }
 
     private fun hideMenu() {
+        // The menu is collapsed from several views; a second collapse would animate and tear
+        // the window down twice.
+        if (!isShown) return
         isShown = false
         vibratePhone(this)
         binding.root.elevation = 0.dpToPx()
@@ -331,21 +336,47 @@ class SidebarMenuService() : LifecycleService() {
 
     private fun getSidebarApp() {
         binding.cpiLoading.isVisible = true
-        lifecycleScope.launch {
+        // Called again after an app is removed: restart the collection instead of stacking
+        // another collector on the same flow.
+        sidebarAppsJob?.cancel()
+        sidebarAppsJob = lifecycleScope.launch {
             iReyamfRepository.getAppInfoList().collect {
                 _showApp.value = it
             }
         }
     }
 
-    private fun stopService() {
-        try {
-            windowManager.removeView(binding.root)
-            stopSelf()
-            startService(Intent(this, SidebarService::class.java))
-        } catch (e: Exception) {
-            Log.d("reYAMF", "Sidebar killed")
+    private fun detachWindow() {
+        teardown.runOnce {
+            if (!::windowManager.isInitialized || !::binding.isInitialized) return@runOnce
+            runCatching { windowManager.removeView(binding.root) }
+                .onFailure { Log.d(TAG, "the sidebar menu is already detached", it) }
         }
+    }
+
+    private fun updatePosition() {
+        if (!::windowManager.isInitialized || !::binding.isInitialized) return
+        runCatching { windowManager.updateViewLayout(binding.root, params) }
+            .onFailure { Log.d(TAG, "the sidebar menu is gone", it) }
+    }
+
+    private fun stopService() {
+        sidebarAppsJob?.cancel()
+        detachWindow()
         setServiceState(this, ServiceState.STOPPED)
+        stopSelf()
+        // Bring the collapsed sidebar back. Android 12+ may refuse a background service start;
+        // that must not escape as a crash, the user can start the sidebar from the app again.
+        runCatching { startService(Intent(this, SidebarService::class.java)) }
+            .onFailure { Log.e(TAG, "cannot restart the sidebar service", it) }
+    }
+
+    override fun onDestroy() {
+        sidebarAppsJob?.cancel()
+        sidebarAppsJob = null
+        detachWindow()
+        isServiceRunning = false
+        setServiceState(this, ServiceState.STOPPED)
+        super.onDestroy()
     }
 }

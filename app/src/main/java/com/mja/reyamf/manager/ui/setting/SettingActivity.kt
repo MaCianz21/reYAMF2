@@ -43,7 +43,8 @@ class SettingActivity : AppCompatActivity() {
         )
     }
 
-    lateinit var config: YAMFConfig
+    var config: YAMFConfig = YAMFConfig()
+    private var configLoaded = false
     private val preference: SharedPreferences by lazy { PreferenceManager.getDefaultSharedPreferences(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,7 +63,13 @@ class SettingActivity : AppCompatActivity() {
 
     private fun initData() {
         binding?.apply {
-            config = gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java)
+            val rawConfig = YAMFManagerProxy.configJson
+            config = runCatching { gson.fromJson(rawConfig, YAMFConfig::class.java) }
+                .onFailure { Log.w("reYAMF", "cannot read the module config", it) }
+                .getOrNull() ?: YAMFConfig()
+            // "{}" is the fallback of an unreachable module service; writing it back would
+            // replace the real config with defaults when the screen closes.
+            configLoaded = rawConfig != "{}"
             etReduceDPI.setText(config.reduceDPI.toString())
             btnFlags.text = config.flags.toString()
             sColoerd.isChecked = config.coloredController
@@ -77,7 +84,10 @@ class SettingActivity : AppCompatActivity() {
             sUseAppList.isChecked = preference.getBoolean("useAppList", true)
             sForceShowIME.isChecked = config.showForceShowIME
             sliderRounded.value = config.windowRoundedCorner.toFloat()
-            sliderAnimationSpeed.value = config.animationSpeed
+            sliderAnimationSpeed.value = config.animationSpeed.coerceIn(
+                sliderAnimationSpeed.valueFrom,
+                sliderAnimationSpeed.valueTo
+            )
             tvRoundedValue.text = "${config.windowRoundedCorner}"
             tvAnimationSpeedValue.text = if (config.animationSpeed == 5100f){
                 getString(R.string.default_speed)
@@ -182,8 +192,8 @@ class SettingActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         binding?.apply {
+            if (!configLoaded) return@apply
             config.reduceDPI = etReduceDPI.text.toString().toIntOrNull() ?: config.reduceDPI
             config.flags = btnFlags.text.toString().toIntOrNull() ?: config.flags
             config.surfaceView = when (val surface = btnSurface.text.toString()) {
@@ -227,5 +237,7 @@ class SettingActivity : AppCompatActivity() {
             preference.edit().putBoolean("useAppList", sUseAppList.isChecked).apply()
             YAMFManagerProxy.updateConfig(gson.toJson(config))
         }
+        _binding = null
+        super.onDestroy()
     }
 }

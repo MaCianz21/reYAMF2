@@ -22,7 +22,7 @@ class DatabaseModule {
             ReyamfDatabase::class.java,
             "reyamf.db"
         )
-            .fallbackToDestructiveMigration()
+            .fallbackToDestructiveMigration(dropAllTables = true)
             .build()
     }
 

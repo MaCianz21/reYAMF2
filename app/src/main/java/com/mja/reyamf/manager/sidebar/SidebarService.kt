@@ -23,6 +23,7 @@ import androidx.core.graphics.toColorInt
 import com.juanarton.batterysense.batterymonitorservice.ServiceState
 import com.juanarton.batterysense.batterymonitorservice.setServiceState
 import com.mja.reyamf.R
+import com.mja.reyamf.common.OneShotGuard
 import com.mja.reyamf.common.gson
 import com.mja.reyamf.databinding.SidebarLayoutBinding
 import com.mja.reyamf.manager.services.YAMFManagerProxy
@@ -43,6 +44,7 @@ class SidebarService : Service() {
     private lateinit var params : WindowManager.LayoutParams
     private lateinit var windowManager: WindowManager
     private var isServiceRunning = false
+    private val teardown = OneShotGuard()
 
     private var initialX: Int = 0
     private var initialY: Int = 0
@@ -67,7 +69,12 @@ class SidebarService : Service() {
 
         if (!isServiceRunning) {
             isServiceRunning = true
-            initSidebar()
+            runCatching { initSidebar() }.onFailure {
+                Log.e("reYAMF", "Failed to start the sidebar", it)
+                isServiceRunning = false
+                setServiceState(this, ServiceState.STOPPED)
+                stopSelf()
+            }
         }
     }
 
@@ -76,7 +83,8 @@ class SidebarService : Service() {
         val inflater = LayoutInflater.from(themedContext)
         binding = SidebarLayoutBinding.inflate(inflater)
 
-        config = gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java)
+        config = runCatching { gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java) }
+            .getOrNull() ?: YAMFConfig()
 
         params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -178,12 +186,12 @@ class SidebarService : Service() {
             when (rotation) {
                 Surface.ROTATION_0, Surface.ROTATION_180 -> {
                     params.y = config.portraitY
-                    windowManager.updateViewLayout(binding.root, params)
+                    updatePosition()
                     newOrientation = 0
                 }
                 Surface.ROTATION_90, Surface.ROTATION_270 -> {
                     params.y = config.landscapeY
-                    windowManager.updateViewLayout(binding.root, params)
+                    updatePosition()
                     newOrientation = 1
                 }
             }
@@ -198,20 +206,27 @@ class SidebarService : Service() {
     private fun openApp(event: MotionEvent): Boolean {
         job?.cancel()
         movable = false
-        if (initialTouchY == event.rawY) {
+
+        val tapped = initialTouchY == event.rawY
+        val swiped = swipeX > 200
+        if (tapped || swiped) {
             vibratePhone(this)
-            startService(Intent(this, SidebarMenuService::class.java))
-            stopService()
-            isShown = false
+            // Android 12+ can refuse a background service start. Only collapse the sidebar
+            // once the menu actually started, so a refusal leaves the user a working sidebar.
+            val menuStarted = runCatching {
+                startService(Intent(this, SidebarMenuService::class.java))
+                true
+            }.onFailure {
+                Log.e("reYAMF", "cannot open the sidebar menu service", it)
+            }.getOrDefault(false)
+
+            if (menuStarted) {
+                stopService()
+                isShown = false
+            }
         }
 
-        if (swipeX > 200) {
-            vibratePhone(this)
-            startService(Intent(this, SidebarMenuService::class.java))
-            stopService()
-            isShown = false
-            swipeX = 0
-        }
+        if (swiped) swipeX = 0
         return true
     }
 
@@ -220,7 +235,7 @@ class SidebarService : Service() {
         params.y = initialY + (event.rawY - initialTouchY).toInt()
 
         if (movable) {
-            windowManager.updateViewLayout(binding.root, params)
+            updatePosition()
 
             val displayManager = getSystemService(DISPLAY_SERVICE) as DisplayManager
             val display = displayManager.getDisplay(Display.DEFAULT_DISPLAY)
@@ -252,6 +267,7 @@ class SidebarService : Service() {
     }
 
     private fun startCounter() {
+        job?.cancel()
         job = CoroutineScope(Dispatchers.IO).launch {
             delay(200)
             movable = true
@@ -275,14 +291,36 @@ class SidebarService : Service() {
             .build()
     }
 
-    private fun stopService() {
-        try {
-            windowManager.removeView(binding.root)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-        } catch (e: Exception) {
-            Log.d("reYAMF", "Sidebar killed")
+    private fun updatePosition() {
+        if (!::windowManager.isInitialized || !::binding.isInitialized) return
+        runCatching { windowManager.updateViewLayout(binding.root, params) }
+            .onFailure { Log.d("reYAMF", "the sidebar window is gone", it) }
+    }
+
+    private fun detachWindow() {
+        teardown.runOnce {
+            if (!::windowManager.isInitialized || !::binding.isInitialized) return@runOnce
+            runCatching { windowManager.removeView(binding.root) }
+                .onFailure { Log.d("reYAMF", "the sidebar window is already detached", it) }
         }
+    }
+
+    private fun stopService() {
+        job?.cancel()
+        job = null
+        detachWindow()
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            .onFailure { Log.d("reYAMF", "the sidebar is not in the foreground", it) }
         setServiceState(this, ServiceState.STOPPED)
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        job?.cancel()
+        job = null
+        detachWindow()
+        isServiceRunning = false
+        setServiceState(this, ServiceState.STOPPED)
+        super.onDestroy()
     }
 }

@@ -4,9 +4,14 @@ import android.content.ContentProvider
 import android.content.ContentValues
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import com.mja.reyamf.manager.services.YAMFManagerProxy
 
 class ServiceProvider: ContentProvider() {
+    companion object {
+        private const val TAG = "reYAMFServiceProvider"
+    }
+
     override fun onCreate() = false
 
     override fun query(
@@ -30,10 +35,19 @@ class ServiceProvider: ContentProvider() {
         selectionArgs: Array<out String>?
     ) = 0
 
+    /**
+     * Called by system_server to hand the module service to the app. This runs on the caller's
+     * side of the process boundary, so a failure must be answered with null rather than thrown.
+     */
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
-        if (callingPackage != "android" || extras == null) return null
-        val binder = extras.getBinder("binder") ?: return null
-        YAMFManagerProxy.linkService(binder)
-        return Bundle()
+        if (extras == null) return null
+        return runCatching {
+            if (callingPackage != "android") return@runCatching null
+            val binder = extras.getBinder("binder") ?: return@runCatching null
+            YAMFManagerProxy.linkService(binder)
+            Bundle()
+        }.onFailure {
+            Log.w(TAG, "cannot accept the module service", it)
+        }.getOrNull()
     }
 }

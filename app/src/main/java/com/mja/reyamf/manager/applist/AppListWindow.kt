@@ -22,15 +22,14 @@ import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import com.mja.reyamf.R
+import com.mja.reyamf.common.OneShotGuard
 import com.mja.reyamf.common.model.AppInfo
 import com.mja.reyamf.databinding.WindowAppListBinding
 import com.mja.reyamf.manager.adapter.AppListAdapter
 import com.mja.reyamf.manager.core.domain.repository.IReyamfRepository
 import com.mja.reyamf.manager.services.YAMFManagerProxy
 import com.mja.reyamf.xposed.IAppListCallback
-import com.mja.reyamf.xposed.utils.AppInfoCache
 import com.mja.reyamf.xposed.utils.animateScaleThenResize
-import com.mja.reyamf.xposed.utils.log
 import com.mja.reyamf.xposed.utils.vibratePhone
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -65,6 +64,10 @@ class AppListWindow :  LifecycleService() {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var searchJob: Job? = null
+    private val closeGuard = OneShotGuard()
+
+    @Volatile
+    private var destroyed = false
 
     override fun onBind(intent: Intent): IBinder? {
         super.onBind(intent)
@@ -74,6 +77,13 @@ class AppListWindow :  LifecycleService() {
     override fun onCreate() {
         super.onCreate()
 
+        runCatching { initWindow() }.onFailure {
+            Log.e(TAG, "Failed to open the app list window", it)
+            stopSelf()
+        }
+    }
+
+    private fun initWindow() {
         val themedContext = ContextThemeWrapper(this, R.style.Theme_Reyamf)
         val inflater = LayoutInflater.from(themedContext)
         binding = WindowAppListBinding.inflate(inflater)
@@ -147,6 +157,8 @@ class AppListWindow :  LifecycleService() {
 
                     YAMFManagerProxy.getAppListAsync(object : IAppListCallback.Stub() {
                         override fun onAppListReceived(appList: MutableList<AppInfo>) {
+                            // Delivered on a binder thread, possibly after the window closed.
+                            if (destroyed) return
                             apps.addAll(appList)
                         }
 
@@ -271,12 +283,17 @@ class AppListWindow :  LifecycleService() {
     }
 
     private fun close() {
-        stopSelf()
+        closeGuard.runOnce { stopSelf() }
     }
 
     override fun onDestroy() {
+        destroyed = true
         searchJob?.cancel()
-        windowManager.removeView(binding.root)
+        runCatching {
+            if (::binding.isInitialized && ::windowManager.isInitialized) {
+                windowManager.removeView(binding.root)
+            }
+        }.onFailure { Log.d(TAG, "window already detached", it) }
         scope.cancel()
         super.onDestroy()
     }

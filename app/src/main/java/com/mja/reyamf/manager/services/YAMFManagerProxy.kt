@@ -1,5 +1,6 @@
 package com.mja.reyamf.manager.services
 
+import android.os.DeadObjectException
 import android.os.IBinder
 import android.os.IBinder.DeathRecipient
 import android.util.Log
@@ -8,35 +9,31 @@ import com.mja.reyamf.xposed.IAppIconCallback
 import com.mja.reyamf.xposed.IAppListCallback
 import com.mja.reyamf.xposed.IOpenCountListener
 import com.mja.reyamf.xposed.IYAMFManager
-import java.lang.reflect.InvocationHandler
-import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 
 object YAMFManagerProxy : IYAMFManager, DeathRecipient {
     private const val TAG = "reYAMFManagerProxy"
 
-    private class ServiceProxy(private val obj: IYAMFManager) : InvocationHandler {
-        override fun invoke(proxy: Any?, method: Method, args: Array<out Any?>?): Any? {
-            val result = method.invoke(obj, *args.orEmpty())
-            if (result == null) Log.i(TAG, "Call service method ${method.name}")
-            else Log.i(
-                TAG,
-                "Call service method ${method.name} with result " + result.toString().take(20)
-            )
-            return result
-        }
-    }
-
     @Volatile
     private var service: IYAMFManager? = null
 
+    /**
+     * The service lives in system_server, which can restart at any moment. A dead binder must
+     * degrade to the fallback instead of crashing the manager UI.
+     */
+    private fun <T> call(fallback: T, block: (IYAMFManager) -> T): T {
+        val current = service ?: return fallback
+        return runCatching { block(current) }
+            .onFailure { t ->
+                Log.w(TAG, "service call failed", t)
+                if (t is DeadObjectException) service = null
+            }
+            .getOrDefault(fallback)
+    }
+
     fun linkService(binder: IBinder) {
-        service = Proxy.newProxyInstance(
-            javaClass.classLoader,
-            arrayOf(IYAMFManager::class.java),
-            ServiceProxy(IYAMFManager.Stub.asInterface(binder))
-        ) as IYAMFManager
-        binder.linkToDeath(this, 0)
+        service = IYAMFManager.Stub.asInterface(binder)
+        runCatching { binder.linkToDeath(this, 0) }
+            .onFailure { Log.w(TAG, "cannot watch the module service", it) }
     }
 
     override fun binderDied() {
@@ -46,63 +43,40 @@ object YAMFManagerProxy : IYAMFManager, DeathRecipient {
 
     override fun asBinder() = service?.asBinder()
 
-    override fun getVersionName(): String? {
-        return service?.versionName
-    }
+    override fun getVersionName(): String? = call(null) { it.versionName }
 
-    override fun getVersionCode() = service?.versionCode ?: 0
+    override fun getVersionCode() = call(0) { it.versionCode }
 
-    override fun getUid() = service?.uid ?: -1
+    override fun getUid() = call(-1) { it.uid }
 
-    override fun createWindow() {
-        service?.createWindow()
-    }
+    override fun createWindow() = call(Unit) { it.createWindow() }
 
-    override fun getBuildTime(): Long {
-        return service?.buildTime ?: 0
-    }
+    override fun getBuildTime(): Long = call(0L) { it.buildTime }
 
-    override fun getConfigJson(): String {
-        return service?.configJson ?: "{}"
-    }
+    override fun getConfigJson(): String = call("{}") { it.configJson }
 
-    override fun updateConfig(newConfig: String) {
-        service?.updateConfig(newConfig)
-    }
+    override fun updateConfig(newConfig: String) = call(Unit) { it.updateConfig(newConfig) }
 
-    override fun registerOpenCountListener(iOpenCountListener: IOpenCountListener) {
-        service?.registerOpenCountListener(iOpenCountListener)
-    }
+    override fun registerOpenCountListener(iOpenCountListener: IOpenCountListener) =
+        call(Unit) { it.registerOpenCountListener(iOpenCountListener) }
 
-    override fun unregisterOpenCountListener(iOpenCountListener: IOpenCountListener) {
-        service?.unregisterOpenCountListener(iOpenCountListener)
-    }
+    override fun unregisterOpenCountListener(iOpenCountListener: IOpenCountListener) =
+        call(Unit) { it.unregisterOpenCountListener(iOpenCountListener) }
 
-    override fun currentToWindow() {
-        service?.currentToWindow()
-    }
+    override fun currentToWindow() = call(Unit) { it.currentToWindow() }
 
-    override fun resetAllWindow() {
-        service?.resetAllWindow()
-    }
+    override fun resetAllWindow() = call(Unit) { it.resetAllWindow() }
 
-    override fun getAppList(): List<AppInfo?>? {
-        return service?.getAppList()
-    }
+    override fun getAppList(): List<AppInfo?>? = call(emptyList()) { it.appList }
 
-    override fun createWindowUserspace(appInfo: AppInfo?) {
-        service?.createWindowUserspace(appInfo)
-    }
+    override fun createWindowUserspace(appInfo: AppInfo?) =
+        call(Unit) { it.createWindowUserspace(appInfo) }
 
-    override fun getAppListAsync(callback: IAppListCallback) {
-        service?.getAppListAsync(callback)
-    }
+    override fun getAppListAsync(callback: IAppListCallback) =
+        call(Unit) { it.getAppListAsync(callback) }
 
-    override fun getAppIcon(callback: IAppIconCallback, appInfo: AppInfo) {
-        service?.getAppIcon(callback, appInfo)
-    }
+    override fun getAppIcon(callback: IAppIconCallback, appInfo: AppInfo) =
+        call(Unit) { it.getAppIcon(callback, appInfo) }
 
-    override fun collapseStatusBarPanel() {
-        service?.collapseStatusBarPanel()
-    }
+    override fun collapseStatusBarPanel() = call(Unit) { it.collapseStatusBarPanel() }
 }

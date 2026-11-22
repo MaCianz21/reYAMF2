@@ -45,7 +45,7 @@ class MainActivity : AppCompatActivity() {
 
     private var _binding: ActivityMainBinding? = null
     private val binding get() = _binding
-    lateinit var config: Config
+    var config: Config = Config()
     private val CODE_DRAW_OVER_OTHER_APP_PERMISSION = 2084
 
     companion object {
@@ -90,7 +90,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initUi() {
-        config = gson.fromJson(YAMFManagerProxy.configJson, Config::class.java)
+        config = runCatching { gson.fromJson(YAMFManagerProxy.configJson, Config::class.java) }
+            .onFailure { Log.w(TAG, "cannot read the module config", it) }
+            .getOrNull() ?: Config()
         val buildTime = YAMFManagerProxy.buildTime
         when(buildTime) {
             0L -> {
@@ -98,7 +100,7 @@ class MainActivity : AppCompatActivity() {
                     ivIcon.setImageResource(R.drawable.ic_error_outline_24)
                     tvActive.setText(R.string.not_activated)
                     tvVersion.visibility = View.GONE
-                    val colorError = theme.getAttr(com.google.android.material.R.attr.colorError).data
+                    val colorError = theme.getAttr(androidx.appcompat.R.attr.colorError).data
                     val colorOnError = theme.getAttr(com.google.android.material.R.attr.colorOnError).data
                     mcvStatus.setCardBackgroundColor(colorError)
                     mcvStatus.outlineAmbientShadowColor = colorError
@@ -218,7 +220,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchSidebar(action: String) {
-        startService(Intent(this, SidebarService::class.java))
+        startServiceSafely(Intent(this, SidebarService::class.java))
+    }
+
+    /** A background service start can be refused; the manager UI must not crash over it. */
+    private fun startServiceSafely(intent: Intent) {
+        runCatching { startService(intent) }
+            .onFailure { Log.e(TAG, "cannot start ${intent.component?.className}", it) }
     }
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
@@ -239,7 +247,7 @@ class MainActivity : AppCompatActivity() {
                 true
             }
             R.id.open_app_list -> {
-                startService(Intent(this, AppListWindow::class.java))
+                startServiceSafely(Intent(this, AppListWindow::class.java))
                 true
             }
             R.id.settings -> {
@@ -291,7 +299,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        runCatching { YAMFManagerProxy.unregisterOpenCountListener(openCountListener) }
+        _binding = null
         super.onDestroy()
-        YAMFManagerProxy.unregisterOpenCountListener(openCountListener)
     }
 }
