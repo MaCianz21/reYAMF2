@@ -98,6 +98,8 @@ so sign them with your own key before installing. Useful tasks:
 - Some apps restart while being resized.
 - After collapsing a window to its app icon, tapping the icon does not always restore it; the
   minimize state does restore.
+- Keyboard might not show up when trying to type inside the floating window
+- Navigation buttons acts on the background application even when the foreground window is focused
 
 ## Credits
 
