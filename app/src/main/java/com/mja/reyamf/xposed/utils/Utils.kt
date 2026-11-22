@@ -23,6 +23,7 @@ import android.os.UserHandle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.Settings
+import android.util.Log
 import android.util.TypedValue
 import android.view.View
 import android.view.animation.AccelerateDecelerateInterpolator
@@ -34,25 +35,24 @@ import android.widget.LinearLayout
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.bitmap.CenterCrop
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
-import com.github.kyuubiran.ezxhelper.utils.argTypes
-import com.github.kyuubiran.ezxhelper.utils.args
-import com.github.kyuubiran.ezxhelper.utils.invokeMethod
-import com.github.kyuubiran.ezxhelper.utils.newInstance
+import com.mja.reyamf.common.reflect.argTypes
+import com.mja.reyamf.common.reflect.args
+import com.mja.reyamf.common.reflect.invokeMethod
+import com.mja.reyamf.common.reflect.newInstance
+import com.mja.reyamf.common.HookPlatform
 import com.mja.reyamf.common.gson
 import com.mja.reyamf.common.model.StartCmd
 import com.mja.reyamf.common.onException
 import com.mja.reyamf.manager.services.YAMFManagerProxy
 import com.mja.reyamf.xposed.services.YAMFManager
-import de.robv.android.xposed.XposedBridge
 import com.mja.reyamf.common.model.Config as YAMFConfig
 
 fun log(tag: String, message: String) {
-    XposedBridge.log("[$tag] $message")
+    HookPlatform.log(Log.INFO, tag, message)
 }
 
 fun log(tag: String, message: String, t: Throwable) {
-    XposedBridge.log("[$tag] $message")
-    XposedBridge.log(t)
+    HookPlatform.log(Log.ERROR, tag, message, t)
 }
 
 @SuppressLint("MissingPermission")
@@ -188,11 +188,8 @@ fun animateResize(
         1.0f // fallback to normal scale if not found
     }
 
-    val config = try {
-        gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java)
-    } catch (e: Exception) {
-        gson.fromJson(YAMFManager.configJson, YAMFConfig::class.java)
-    }
+    val config = runCatching { gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java) }
+        .getOrNull() ?: YAMFConfig()
     val adjustedDuration = (if (config.animationSpeed < 5100) config.animationSpeed else 300).toLong()
 
     val widthAnimator = ValueAnimator.ofInt(startWidth, endWidth).apply {
@@ -246,11 +243,8 @@ fun animateScaleThenResize(
         1.0f
     }
 
-    val config = try {
-        gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java)
-    } catch (e: Exception) {
-        gson.fromJson(YAMFManager.configJson, YAMFConfig::class.java)
-    }
+    val config = runCatching { gson.fromJson(YAMFManagerProxy.configJson, YAMFConfig::class.java) }
+        .getOrNull() ?: YAMFConfig()
     val adjustedDuration = (if (config.animationSpeed < 5100) config.animationSpeed else 300 * scale).toLong()
 
     val scaleAnimation = ScaleAnimation(
