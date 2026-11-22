@@ -1,13 +1,14 @@
 package com.mja.reyamf.xposed.hook
 
+import android.app.AndroidAppHelper
 import android.content.Intent
 import android.content.pm.IPackageManager
-import android.util.Log
 import com.github.kyuubiran.ezxhelper.init.EzXHelperInit
 import com.github.kyuubiran.ezxhelper.utils.findMethod
 import com.github.kyuubiran.ezxhelper.utils.hookAfter
 import com.github.kyuubiran.ezxhelper.utils.hookBefore
 import com.mja.reyamf.BuildConfig
+import com.mja.reyamf.common.HookPlatform
 import com.mja.reyamf.xposed.services.UserService
 import com.mja.reyamf.xposed.services.YAMFManager
 import com.mja.reyamf.xposed.utils.log
@@ -29,6 +30,13 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
 
     override fun initZygote(startupParam: IXposedHookZygoteInit.StartupParam) {
         EzXHelperInit.initZygote(startupParam)
+        // Shared module code logs and reaches the app context through this seam.
+        HookPlatform.logSink = { _, tag, message, t ->
+            XposedBridge.log("[$tag] $message")
+            if (t != null) XposedBridge.log(t)
+        }
+        HookPlatform.applicationProvider = { AndroidAppHelper.currentApplication() }
+        HookPlatform.moduleAssetPathAdder = { resources -> EzXHelperInit.addModuleAssetPath(resources) }
     }
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -38,34 +46,43 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
         EzXHelperInit.initHandleLoadPackage(lpparam)
         Initiator.init(lpparam.classLoader)
 
-         var serviceManagerHook: XC_MethodHook.Unhook? = null
-         serviceManagerHook = findMethod("android.os.ServiceManager") {
-             name == "addService"
-         }.hookBefore { param ->
-             if (param.args[0] == "package") {
-                 serviceManagerHook?.unhook()
-                 val pms = param.args[1] as IPackageManager
-                 log(TAG, "Got pms: $pms")
-                 thread {
-                     runCatching {
-                         UserService.register(pms)
-                         log(TAG, "UserService started")
-                     }.onFailure {
-                         log(TAG, "UserService failed to start", it)
-                     }
-                 }
-             }
-         }
+        var serviceManagerHook: XC_MethodHook.Unhook? = null
+        runCatching {
+            serviceManagerHook = findMethod("android.os.ServiceManager") {
+                name == "addService"
+            }.hookBefore { param ->
+                if (param.args[0] == "package") {
+                    serviceManagerHook?.unhook()
+                    val pms = param.args[1] as IPackageManager
+                    log(TAG, "Got pms: $pms")
+                    thread {
+                        runCatching {
+                            UserService.register(pms)
+                            log(TAG, "UserService started")
+                        }.onFailure {
+                            log(TAG, "UserService failed to start", it)
+                        }
+                    }
+                }
+            }
+        }.onFailure { log(TAG, "cannot hook ServiceManager.addService", it) }
 
-         var activityManagerServiceSystemReadyHook: XC_MethodHook.Unhook? = null
-         activityManagerServiceSystemReadyHook = findMethod("com.android.server.am.ActivityManagerService") {
-             name == "systemReady"
-         }.hookAfter {
-             activityManagerServiceSystemReadyHook?.unhook()
-             YAMFManager.activityManagerService = it.thisObject
-             YAMFManager.systemReady()
-             log(TAG, "system ready")
-         }
+        var activityManagerServiceSystemReadyHook: XC_MethodHook.Unhook? = null
+        runCatching {
+            activityManagerServiceSystemReadyHook =
+                findMethod("com.android.server.am.ActivityManagerService") {
+                    name == "systemReady"
+                }.hookAfter { param ->
+                    activityManagerServiceSystemReadyHook?.unhook()
+                    // Anything thrown here would abort system_server startup, so it is contained.
+                    runCatching {
+                        YAMFManager.activityManagerService = param.thisObject
+                        YAMFManager.systemReady()
+                        log(TAG, "system ready")
+                    }.onFailure { log(TAG, "reYAMF failed to initialise", it) }
+                }
+        }.onFailure { log(TAG, "cannot hook ActivityManagerService.systemReady", it) }
+
         runCatching {
             findMethod("com.android.server.am.ActivityManagerService") {
                 name == "checkBroadcastFromSystem"
@@ -75,7 +92,7 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
                     it.result = Unit
             }
         }.onFailure {
-            log(TAG, "ActivityManagerService checkBroadcastFromSystem fail")
+            log(TAG, "ActivityManagerService checkBroadcastFromSystem fail", it)
         }
 
         runCatching {
@@ -87,10 +104,10 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
                     it.result = Unit
             }
         }.onFailure {
-            log(TAG, "BroadcastController checkBroadcastFromSystem fail")
+            log(TAG, "BroadcastController checkBroadcastFromSystem fail", it)
         }
 
-        try {
+        runCatching {
             val clazz = XposedHelpers.findClass(
                 "com.android.server.wm.InputMonitor",
                 lpparam.classLoader
@@ -103,13 +120,16 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
                 String::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val thisObject = param.thisObject
-                        val displayId = XposedHelpers.getIntField(thisObject, "mDisplayId")
-                        YAMFManager.currentDisplayId = displayId
+                        runCatching {
+                            val displayId = XposedHelpers.getIntField(param.thisObject, "mDisplayId")
+                            YAMFManager.currentDisplayId = displayId
+                        }.onFailure {
+                            log(TAG, "cannot read the focused display", it)
+                        }
                     }
                 }
             )
-        } catch (e: Throwable) {
+        }.onFailure { e ->
             XposedBridge.log("[XposedHook] Error hooking requestFocus: ${e.message}")
         }
     }

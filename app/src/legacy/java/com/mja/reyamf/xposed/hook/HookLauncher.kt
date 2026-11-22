@@ -51,13 +51,14 @@ import java.lang.reflect.Proxy
 class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
     companion object {
         const val TAG = "reYAMF_HookLauncher"
+        // Shared with the vector entry point and the manager app.
         const val ACTION_RECEIVE_LAUNCHER_CONFIG =
-            "com.mja.reyamf.ACTION_RECEIVE_LAUNCHER_CONFIG"
+            LauncherHooksConfig.ACTION_RECEIVE_LAUNCHER_CONFIG
 
-        const val EXTRA_HOOK_RECENT = "hookRecent"
-        const val EXTRA_HOOK_TASKBAR = "hookTaskbar"
-        const val EXTRA_HOOK_POPUP = "hookPopup"
-        const val EXTRA_HOOK_TRANSIENT_TASKBAR = "hookTransientTaskbar"
+        const val EXTRA_HOOK_RECENT = LauncherHooksConfig.EXTRA_HOOK_RECENT
+        const val EXTRA_HOOK_TASKBAR = LauncherHooksConfig.EXTRA_HOOK_TASKBAR
+        const val EXTRA_HOOK_POPUP = LauncherHooksConfig.EXTRA_HOOK_POPUP
+        const val EXTRA_HOOK_TRANSIENT_TASKBAR = LauncherHooksConfig.EXTRA_HOOK_TRANSIENT_TASKBAR
     }
 
     private var isRegistered = false
@@ -73,7 +74,7 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
         findMethod("com.android.launcher3.Launcher") {
             name == "onCreate"
         }.hookAfter {
-            if (!isRegistered) {
+            if (!isRegistered) runCatching {
                 val activity = it.thisObject as Activity
                 val application = activity.application
                 application.registerReceiver(ACTION_RECEIVE_LAUNCHER_CONFIG) { _, intent ->
@@ -102,7 +103,7 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 })
 
                 isRegistered = true
-            }
+            }.onFailure { e -> log(TAG, "cannot attach to the launcher", e) }
         }
     }
 
@@ -115,9 +116,17 @@ class HookLauncher : IXposedHookLoadPackage, IXposedHookZygoteInit {
             ), "getEnabledShortcuts", object : XC_MethodHook() {
                 @SuppressLint("UseCompatLoadingForDrawables")
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    val taskView = param.args[0] as View
-                    val shortcuts = param.result as MutableList<Any>
-                    val itemInfo = XposedHelpers.getObjectField(shortcuts[0], "mItemInfo")
+                    // Runs inside the launcher UI: a changed framework field must not crash it.
+                    runCatching { addOpenInYamfShortcut(param) }
+                        .onFailure { log(TAG, "cannot add the open-in-reYAMF shortcut", it) }
+                }
+
+                @SuppressLint("UseCompatLoadingForDrawables")
+                private fun addOpenInYamfShortcut(param: MethodHookParam) {
+                    val taskView = param.args.getOrNull(0) as? View ?: return
+                    val shortcuts = param.result as? MutableList<Any> ?: return
+                    val itemInfo = shortcuts.firstOrNull()
+                        ?.let { XposedHelpers.getObjectField(it, "mItemInfo") } ?: return
 
                     var task: Any = Unit
 

@@ -12,3 +12,12 @@
 -keepclassmembers class com.android.dx.dex.cf.CfTranslator { public static *** translate(...); }
 -dontwarn edu.umd.cs.findbugs.annotations.SuppressFBWarnings
 -dontwarn javax.annotation.Nonnull
+
+# --- libxposed (vector variant) ---------------------------------------------------------
+# META-INF/xposed/java_init.list is the only registration channel, so the entry class must
+# survive minification and the list must follow any renaming.
+-keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
+    public <init>();
+}
+-adaptresourcefilecontents META-INF/xposed/java_init.list
+-dontwarn io.github.libxposed.annotation.**
