@@ -24,5 +24,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "reYAMF"
+rootProject.name = "reYAMF2"
 include(":app", ":android-stub")

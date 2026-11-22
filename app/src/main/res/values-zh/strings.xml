@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">reYAMF</string>
+    <string name="app_name">reYAMF2</string>
     <string name="details">详情</string>
     <string name="unknown_error">未知错误</string>
     <string name="activated">模块已激活</string>
@@ -28,7 +28,7 @@
     <string name="window_size_separator">x</string>
     <string name="default_window_size_text">默认窗口大小</string>
     <string name="ime_switch_text">在窗口中显示输入法\n必须启用 VIRTUAL_DISPLAY_FLAG_PUBLIC</string>
-    <string name="keep_alive_service_text">保持 reYAMF 在后台运行</string>
+    <string name="keep_alive_service_text">保持 reYAMF2 在后台运行</string>
     <string name="collapsed_app_icon">折叠视图的应用图标</string>
     <string name="wow_nsuch_empty">哇！\n空荡荡~</string>
     <string name="enable_sidebar">启用侧边栏</string>
@@ -37,7 +37,7 @@
     <string name="note_content"><b>如果你无法接受任何应用的权限请求，</b> 这是因为侧边栏覆盖了屏幕</string>
     <string name="close_butt_desc">点击侧边栏上的此按钮关闭侧边栏</string>
     <string name="restart_butt_desc">或点击此按钮临时关闭侧边栏，侧边栏会在5秒后重新出现</string>
-    <string name="reyamf">reYAMF</string>
+    <string name="reyamf">reYAMF2</string>
     <string name="a_yamf_fork">a YAMF fork</string>
     <string name="view_type">视图类型</string>
     <string name="dpi_density">DPI 密度</string>

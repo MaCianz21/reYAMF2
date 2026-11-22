@@ -1,6 +1,6 @@
 [![Chat](https://img.shields.io/badge/Chat-Telegram-blue.svg?logo=telegram)](https://t.me/+HjGegWE9jBM0N2Rl)
 
-# reYAMF
+# reYAMF2
 
 Run Android apps in resizable freeform windows on phones and tablets, without the desktop
 mode that the system normally requires.
@@ -20,8 +20,8 @@ The module is built for both hook platforms from the same sources. Install **exa
 
 | APK | Hook platform | Registration |
 | --- | --- | --- |
-| `reYAMF-<version>-vector.apk` | Vector 2.1+ | `META-INF/xposed/` (libxposed API 101) |
-| `reYAMF-<version>-legacy.apk` | LSPosed / classic Xposed | `assets/xposed_init` |
+| `reYAMF2-<version>-vector.apk` | Vector 2.1+ | `META-INF/xposed/` (libxposed API 101) |
+| `reYAMF2-<version>-legacy.apk` | LSPosed / classic Xposed | `assets/xposed_init` |
 
 Both have the same features. If your hook manager is not Vector, take the legacy APK.
 
@@ -29,7 +29,7 @@ Both have the same features. If your hook manager is not Vector, take the legacy
 
 1. Download the APK that matches your hook manager from the releases page.
 2. Install it and enable the module in the hook manager.
-3. Open the app, then enable the **reYAMF accessibility service** in system settings.
+3. Open the app, then enable the **reYAMF2 accessibility service** in system settings.
 4. Reboot. Existing windows are only safe to keep if the module version did not change.
 
 ## What this build changes
