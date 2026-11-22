@@ -1,5 +1,3 @@
-[![Chat](https://img.shields.io/badge/Chat-Telegram-blue.svg?logo=telegram)](https://t.me/+HjGegWE9jBM0N2Rl)
-
 # reYAMF2
 
 Run Android apps in resizable freeform windows on phones and tablets, without the desktop
@@ -7,6 +5,12 @@ mode that the system normally requires.
 
 A fork of [YAMF](https://github.com/kaii-lb/YAMFsquared) (which is itself a fork of the
 original work by duzhaokun123), rebuilt for current Android with a smaller window chrome.
+
+## Disclaimer
+
+This software is provided as-is, without any warranty. The author does not claim
+responsibility for any damage, data loss, instability, or other harm that may result
+from using this module on your device or software system. Use at your own risk.
 
 ## Requirements
 
