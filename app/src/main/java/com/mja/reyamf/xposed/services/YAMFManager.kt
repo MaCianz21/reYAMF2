@@ -51,6 +51,7 @@ import com.qauxv.ui.CommonContextWrapper
 import rikka.hidden.compat.ActivityManagerApis
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 
 object YAMFManager : IYAMFManager.Stub() {
@@ -73,6 +74,13 @@ object YAMFManager : IYAMFManager.Stub() {
     const val SOURCE_POPUP = 3
 
     private val windows = WindowRegistry()
+
+    /** Live windows keyed by the virtual display they host, so a second request can reuse one. */
+    private val windowsByDisplay = ConcurrentHashMap<Int, AppWindow>()
+
+    /** Display of the window the user interacted with last, or -1 when there is none. */
+    @Volatile
+    private var activeDisplayId = -1
 
     /**
      * A default value keeps early calls (app queried the config before systemReady) from
@@ -125,16 +133,7 @@ object YAMFManager : IYAMFManager.Stub() {
         }.onFailure { log(TAG, "cannot register $ACTION_CURRENT_TO_WINDOW", it) }
 
         runCatching {
-            context.registerReceiver(ACTION_OPEN_APP_LIST) { _, _ ->
-                runCatching {
-                    val component = ComponentName(
-                        "com.mja.reyamf",
-                        "com.mja.reyamf.manager.applist.AppListWindow"
-                    )
-                    (HookPlatform.currentApplication() ?: context)
-                        .startService(Intent().setComponent(component))
-                }.onFailure { log(TAG, "cannot open the app list window", it) }
-            }
+            context.registerReceiver(ACTION_OPEN_APP_LIST) { _, _ -> openAppList() }
         }.onFailure { log(TAG, "cannot register $ACTION_OPEN_APP_LIST", it) }
 
         runCatching {
@@ -176,8 +175,38 @@ object YAMFManager : IYAMFManager.Stub() {
         notifyOpenCount()
     }
 
+    /** Registers a freshly created window and makes it the current navigation bar target. */
+    fun registerWindow(displayId: Int, window: AppWindow) {
+        windowsByDisplay[displayId] = window
+        activeDisplayId = displayId
+    }
+
     fun removeWindow(id: Int) {
+        windowsByDisplay.remove(id)
+        if (activeDisplayId == id) activeDisplayId = -1
         if (windows.remove(id)) notifyOpenCount()
+    }
+
+    /** Remembers which window the navigation bar buttons must act on. */
+    fun onWindowFocused(displayId: Int) {
+        if (windowsByDisplay.containsKey(displayId)) activeDisplayId = displayId
+    }
+
+    /**
+     * Follows input focus between displays. Focus leaving the windows' displays (for the launcher,
+     * another app, or a system panel) hands the navigation bar back to the system.
+     */
+    fun onDisplayFocusChanged(displayId: Int) {
+        currentDisplayId = displayId
+        activeDisplayId = if (windowsByDisplay.containsKey(displayId)) displayId else -1
+    }
+
+    /** The window the navigation bar buttons should act on, if any. */
+    fun activeWindow(): AppWindow? = windowsByDisplay[activeDisplayId]
+
+    /** Hands the navigation bar back to the system after the window stepped aside. */
+    fun clearActiveWindow() {
+        activeDisplayId = -1
     }
 
     fun isTop(id: Int) = windows.isTop(id)
@@ -185,6 +214,13 @@ object YAMFManager : IYAMFManager.Stub() {
     fun moveToTop(id: Int) = windows.moveToTop(id)
 
     fun createWindow(startCmd: StartCmd?) {
+        // Tapping an app that is already open must raise its window instead of opening a second
+        // one: a second window pulls the running task onto its own display and leaves the first
+        // one empty, showing nothing but the mirrored system decorations.
+        findWindowHosting(startCmd)?.let { existing ->
+            existing.bringToFront(startCmd)
+            return
+        }
         runCatching { Instances.iStatusBarService.collapsePanels() }
             .onFailure { log(TAG, "cannot collapse the status bar panel", it) }
         runCatching {
@@ -197,6 +233,23 @@ object YAMFManager : IYAMFManager.Stub() {
                     .onFailure { log(TAG, "cannot launch inside the new window", it) }
             }
         }.onFailure { log(TAG, "failed to create a floating window", it) }
+    }
+
+    private fun findWindowHosting(startCmd: StartCmd?): AppWindow? {
+        startCmd ?: return null
+        return windowsByDisplay.values.firstOrNull { it.hosts(startCmd) }
+    }
+
+    /** Opens the module's app switcher overlay, used by the navigation bar's recents button. */
+    fun openAppList() {
+        runCatching {
+            val component = ComponentName(
+                "com.mja.reyamf",
+                "com.mja.reyamf.manager.applist.AppListWindow"
+            )
+            (HookPlatform.currentApplication() ?: systemContext)
+                .startService(Intent().setComponent(component))
+        }.onFailure { log(TAG, "cannot open the app list window", it) }
     }
 
     init {

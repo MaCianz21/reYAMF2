@@ -86,7 +86,7 @@
                     app:layout_constraintBottom_toBottomOf="parent"
                     app:layout_constraintEnd_toEndOf="parent"
                     app:layout_constraintStart_toStartOf="parent"
-                    app:layout_constraintTop_toTopOf="parent" />
+                    app:layout_constraintTop_toBottomOf="@id/cvNotch" />
 
                 <TextureView
                     android:id="@+id/viewTexture"
@@ -95,7 +95,7 @@
                     app:layout_constraintBottom_toBottomOf="parent"
                     app:layout_constraintEnd_toEndOf="parent"
                     app:layout_constraintStart_toStartOf="parent"
-                    app:layout_constraintTop_toTopOf="parent" />
+                    app:layout_constraintTop_toBottomOf="@id/cvNotch" />
 
                 <RelativeLayout
                     android:id="@+id/v_sizePreviewer"
@@ -106,12 +106,15 @@
                     android:visibility="invisible"
                     app:layout_constraintBottom_toBottomOf="parent"
                     app:layout_constraintStart_toStartOf="parent"
-                    app:layout_constraintTop_toTopOf="parent" />
+                    app:layout_constraintTop_toBottomOf="@id/cvNotch" />
+
+                <!-- Transparent strip above the app content: it holds the three dots as a
+                     padding band instead of painting a notch over the app. -->
                 <FrameLayout
                     android:id="@+id/cvNotch"
                     android:layout_width="84dp"
                     android:layout_height="26dp"
-                    android:background="@drawable/window_notch"
+                    android:background="@null"
                     app:layout_constraintEnd_toEndOf="parent"
                     app:layout_constraintStart_toStartOf="parent"
                     app:layout_constraintTop_toTopOf="parent">
@@ -124,7 +127,7 @@
                         android:contentDescription="@string/window_actions_desc"
                         android:scaleType="center"
                         android:src="@drawable/three_dot_horiz"
-                        android:tint="#202124" />
+                        android:tint="?attr/colorOnSurfaceVariant" />
                 </FrameLayout>
 
             </androidx.constraintlayout.widget.ConstraintLayout>

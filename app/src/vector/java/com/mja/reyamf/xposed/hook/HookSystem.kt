@@ -2,10 +2,12 @@ package com.mja.reyamf.xposed.hook
 
 import android.content.Intent
 import android.content.pm.IPackageManager
+import android.view.InputEvent
 import com.mja.reyamf.common.reflect.findMethod
 import com.mja.reyamf.common.reflect.getObjectAs
 import com.mja.reyamf.common.reflect.loadClass
 import com.mja.reyamf.BuildConfig
+import com.mja.reyamf.xposed.services.NavKeyRouter
 import com.mja.reyamf.xposed.services.UserService
 import com.mja.reyamf.xposed.services.YAMFManager
 import com.mja.reyamf.xposed.utils.log
@@ -35,6 +37,7 @@ object HookSystem {
         hookActivityManagerReady(module, classLoader)
         hookSystemBroadcastChecks(classLoader)
         hookInputFocus(module, classLoader)
+        hookInjectedInput(module, classLoader)
     }
 
     private fun hookPackageService(module: XposedModule, classLoader: ClassLoader) {
@@ -122,11 +125,38 @@ object HookSystem {
             requestFocus.createHook {
                 before { param ->
                     runCatching {
-                        YAMFManager.currentDisplayId = param.thisObject.getObjectAs<Int>("mDisplayId")
+                        YAMFManager.onDisplayFocusChanged(param.thisObject.getObjectAs<Int>("mDisplayId"))
                     }.onFailure { log(TAG, "cannot read the focused display", it) }
                 }
             }
         }.onFailure { log(TAG, "cannot hook InputMonitor.requestFocus", it) }
+    }
+
+    /**
+     * Intercepts the navigation bar's key injection. The three buttons, and the taskbar's copy of
+     * them, all send their presses through InputManagerService, so this sees them before the
+     * policy hands them to a window on the default display, which is the only place a floating
+     * window can claim them from.
+     */
+    private fun hookInjectedInput(module: XposedModule, classLoader: ClassLoader) {
+        runCatching {
+            val inject = loadClass("com.android.server.input.InputManagerService", classLoader).findMethod {
+                name == "injectInputEvent" && parameterCount == 2 &&
+                        parameterTypes[0] == InputEvent::class.java
+            }
+            deoptimize(module, inject)
+
+            inject.createHook {
+                before { param ->
+                    runCatching {
+                        // Claim success: the press was delivered to the window instead.
+                        if (NavKeyRouter.onInjectedEvent(param.args.getOrNull(0) as? InputEvent)) {
+                            param.result = true
+                        }
+                    }.onFailure { log(TAG, "cannot route the navigation key", it) }
+                }
+            }
+        }.onFailure { log(TAG, "cannot hook InputManagerService.injectInputEvent", it) }
     }
 
     private fun deoptimize(module: XposedModule, executable: Executable) {

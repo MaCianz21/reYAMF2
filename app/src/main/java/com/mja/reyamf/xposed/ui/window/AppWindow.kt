@@ -55,6 +55,7 @@ import com.mja.reyamf.common.reflect.invokeMethod
 import com.google.android.material.color.MaterialColors
 import com.mja.reyamf.common.WindowMetrics
 import com.mja.reyamf.common.getAttr
+import com.mja.reyamf.common.model.StartCmd
 import com.mja.reyamf.common.onException
 import com.mja.reyamf.common.runMain
 import com.mja.reyamf.databinding.LeftBackGestureOverlayBinding
@@ -72,6 +73,8 @@ import com.mja.reyamf.xposed.utils.animateResize
 import com.mja.reyamf.xposed.utils.animateScaleThenResize
 import com.mja.reyamf.xposed.utils.dpToPx
 import com.mja.reyamf.xposed.utils.getActivityInfoCompat
+import com.mja.reyamf.xposed.utils.moveTask
+import com.mja.reyamf.xposed.utils.startAuto
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -136,6 +139,9 @@ class AppWindow(
     private var lastClickTime = 0L
     private val DOUBLE_CLICK_TIME_DELTA: Long = 300
     private var isSuperShown = false
+    /** True while the gesture that dismissed the bubble is down, so it never reaches the app. */
+    private var swallowingGesture = false
+    private var bubbleDismissedAt = 0L
     /** Which control started the gesture, so the shared gesture callbacks know what was tapped. */
     private enum class TapSource { ROOT, NOTCH }
     private var tapSource = TapSource.ROOT
@@ -151,7 +157,8 @@ class AppWindow(
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
         PixelFormat.TRANSLUCENT
     ).apply {
         gravity = Gravity.TOP or Gravity.START
@@ -329,12 +336,24 @@ class AppWindow(
             Instances.windowManager.addView(bubble.root, bubbleParams)
             bubble.root.post { positionBubble() }
         }.onFailure { Log.e(TAG, "cannot add the action bubble", it) }
+        // The bubble sits over the window, so the touch that closes it usually lands on the
+        // window itself. FLAG_WATCH_OUTSIDE_TOUCH reports those taps without consuming them,
+        // which closes the bubble from anywhere on screen.
+        bubble.root.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+                dismissBubbleFromOutside()
+                true
+            } else {
+                false
+            }
+        }
         // Resizes, rotations and the collapse animations all land here, so the bubble follows
         // the window's new top edge without every code path having to remember it.
         binding.root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> positionBubble() }
 
         binding.rootClickMask.setOnTouchListener { _, event ->
             tapSource = TapSource.ROOT
+            markActiveWindow()
             moveGestureDetector.onTouchEvent(event)
             moveToTopIfNeed(event)
             true
@@ -344,6 +363,7 @@ class AppWindow(
         // opens the bubble on a tap.
         binding.ibSuper.setOnTouchListener { _, event ->
             tapSource = TapSource.NOTCH
+            markActiveWindow()
             moveGestureDetector.onTouchEvent(event)
             moveToTopIfNeed(event)
             true
@@ -395,14 +415,10 @@ class AppWindow(
             }
         }
 
+        // The pill's minimize shrinks the window down to its app icon.
         bubble.ibMinimize.setOnClickListener {
             hideSuperBubble()
-            changeMini()
-        }
-
-        bubble.ibCollapse.setOnClickListener {
-            hideSuperBubble()
-            changeCollapsed()
+            if (!isMini && !isCollapsed) changeCollapsed()
         }
 
         // The window is laid out in pixels, so the virtual display has to be created in pixels
@@ -447,7 +463,8 @@ class AppWindow(
             this.height = height
         }
         onVirtualDisplayCreated(displayId)
-
+        YAMFManager.registerWindow(displayId, this)
+        markActiveWindow()
         isResize = false
         binding.cvBackground.post {
             originalWidth = binding.cvBackground.width
@@ -539,16 +556,19 @@ class AppWindow(
         }
     }
 
-    /** Opens or closes the action bubble, which floats clear of the window's top edge. */
+    /** Opens or closes the action bubble over the window's three-dot area. */
     private fun toggleSuperBubble() {
         if (isMini || isCollapsed) return
-        isSuperShown = !isSuperShown
         if (isSuperShown) {
-            positionBubble()
-            animateAlpha(bubble.root, 0f, 1f)
-        } else {
             hideSuperBubble()
+            return
         }
+        // The tap that dismisses the bubble must not immediately reopen it when it lands on
+        // the notch: the outside-touch report arrives before the tap is confirmed.
+        if (SystemClock.uptimeMillis() - bubbleDismissedAt < 400) return
+        isSuperShown = true
+        positionBubble()
+        animateAlpha(bubble.root, 0f, 1f)
     }
 
     private fun hideSuperBubble() {
@@ -558,40 +578,40 @@ class AppWindow(
         }
     }
 
+    /** A touch landed outside the pill, so it closes and stays closed for that whole gesture. */
+    private fun dismissBubbleFromOutside() {
+        if (!isSuperShown) return
+        bubbleDismissedAt = SystemClock.uptimeMillis()
+        hideSuperBubble()
+    }
+
     /**
-     * Centres the bubble on the window and puts it just outside the window's top edge.
+     * Places the bubble on top of the window's notch, covering the three-dot control and a strip
+     * of the window below it.
      *
      * The offsets are expressed in the same gravity space the chrome window uses instead of
      * screen coordinates: a view's location does not match the position input events resolve to,
-     * which put the bubble a status bar too low. When the window is already flush with the top of
-     * the display there is no room above it, so the bubble drops just below the window instead.
+     * which put the bubble a status bar off. Both windows share the chrome's gravity, so aligning
+     * the pill's top edge with the chrome's top edge needs no screen metrics at all.
      */
     private fun positionBubble() {
         if (isDestroyed || !::bubble.isInitialized) return
         val chromeWidth = binding.root.width
         val chromeHeight = binding.root.height
         if (bubbleWidth == 0 || bubbleHeight == 0 || chromeWidth == 0 || chromeHeight == 0) return
-        val gap = 8.dpToPx().toInt()
         val chromeParams = binding.root.layoutParams as WindowManager.LayoutParams
 
         if (orientation == 0) {
-            // Both windows are centred, so equal params.x keeps their centres aligned.
-            val chromeTop = (context.display.height - chromeHeight) / 2 + chromeParams.y
-            val hasRoomAbove = chromeTop - bubbleHeight - gap >= 0
+            // The chrome is centred and the bubble is centred too, so the y offset is measured
+            // from the same centre line and only has to move the pill up by half the height
+            // difference.
             bubbleParams.gravity = Gravity.CENTER
             bubbleParams.x = chromeParams.x
-            bubbleParams.y = if (hasRoomAbove) {
-                chromeParams.y - chromeHeight / 2 - bubbleHeight / 2 - gap
-            } else {
-                chromeParams.y + chromeHeight / 2 + bubbleHeight / 2 + gap
-            }
+            bubbleParams.y = chromeParams.y - chromeHeight / 2 + bubbleHeight / 2
         } else {
             bubbleParams.gravity = Gravity.TOP or Gravity.START
             bubbleParams.x = chromeParams.x + (chromeWidth - bubbleWidth) / 2
-            bubbleParams.y = chromeParams.y - bubbleHeight - gap
-            if (bubbleParams.y < 0) {
-                bubbleParams.y = chromeParams.y + chromeHeight + gap
-            }
+            bubbleParams.y = chromeParams.y
         }
 
         runCatching { Instances.windowManager.updateViewLayout(bubble.root, bubbleParams) }
@@ -667,7 +687,10 @@ class AppWindow(
     fun onTaskMovedToFront(taskInfo: ActivityManager.RunningTaskInfo) {
         if (isDestroyed) return
         runCatching {
-            if (taskInfo.getObject("displayId") == displayId) updateTask(taskInfo)
+            if (taskInfo.getObject("displayId") == displayId) {
+                markActiveWindow()
+                updateTask(taskInfo)
+            }
         }.onFailure { Log.d(TAG, "onTaskMovedToFront failed", it) }
     }
 
@@ -943,6 +966,7 @@ class AppWindow(
             override fun onTouch(v: View, event: MotionEvent): Boolean {
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
+                        markActiveWindow()
                         beginX = event.rawX
                         beginY = event.rawY
                         binding.vSizePreviewer.layoutParams.let {
@@ -992,6 +1016,77 @@ class AppWindow(
         })
     }
 
+    /** True while an app on this window's display can receive the navigation bar keys. */
+    val canReceiveKeys: Boolean
+        get() = !isDestroyed && displayId > 0 && !isMini && !isCollapsed
+
+    /** Records this window as the target of the navigation bar buttons. */
+    private fun markActiveWindow() {
+        if (displayId > 0) YAMFManager.onWindowFocused(displayId)
+    }
+
+    /**
+     * True when this window already shows the task, or the app, that [startCmd] asks for.
+     * Opening it again would otherwise move the running task out of this display and leave the
+     * window behind empty, showing only the mirrored system decorations.
+     */
+    fun hosts(startCmd: StartCmd?): Boolean {
+        startCmd ?: return false
+        if (isDestroyed || displayId <= 0) return false
+        val tasks = runCatching {
+            Instances.activityTaskManager.getAllRootTaskInfosOnDisplay(displayId)
+        }.getOrNull().orEmpty()
+
+        if (startCmd.canMoveTask && tasks.any { it.taskId == startCmd.taskId }) return true
+
+        val component = startCmd.componentName ?: return false
+        return tasks.any { info ->
+            val activity = info.baseActivity ?: info.topActivity ?: return@any false
+            activity.packageName == component.packageName &&
+                    (startCmd.userId == null || (info.getObject("userId") as? Int) == startCmd.userId)
+        }
+    }
+
+    /**
+     * Raises an already open window, restoring it first if it was minimised or collapsed, and
+     * brings its app back to the front instead of duplicating the window.
+     */
+    fun bringToFront(startCmd: StartCmd?) {
+        if (isDestroyed) return
+        if (isCollapsed) changeCollapsed()
+        if (isMini) changeMini()
+        moveToTop()
+        markActiveWindow()
+        runCatching {
+            val taskId = startCmd?.taskId
+            if (startCmd != null && startCmd.canMoveTask && taskId != null) {
+                moveTask(taskId, displayId)
+            } else {
+                startCmd?.startAuto(displayId)
+            }
+        }.onFailure { Log.d(TAG, "cannot raise the existing window", it) }
+    }
+
+    /** Sends a key press to the app running inside this window's virtual display. */
+    fun forwardKey(keyCode: Int) {
+        if (displayId <= 0 || isMini || isCollapsed) return
+        val now = SystemClock.uptimeMillis()
+        for (action in intArrayOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+            val event = KeyEvent(now, now, action, keyCode, 0).apply {
+                source = InputDevice.SOURCE_KEYBOARD
+                invokeMethod("setDisplayId", args(displayId), argTypes(Integer.TYPE))
+            }
+            runCatching { Instances.inputManager.injectInputEvent(event, 0) }
+                .onFailure { Log.d(TAG, "cannot send key $keyCode to the window", it) }
+        }
+    }
+
+    /** The navigation bar's home button: the window steps aside down to its app icon. */
+    fun navHome() {
+        hideSuperBubble()
+        if (!isMini && !isCollapsed) changeCollapsed()
+    }
+
     fun forwardMotionEvent(event: MotionEvent) {
         if (isSuperShown) return
         val newEvent = MotionEvent.obtain(event)
@@ -1007,7 +1102,20 @@ class AppWindow(
 
     inner class SurfaceOnTouchListener : View.OnTouchListener {
         override fun onTouch(v: View, event: MotionEvent): Boolean {
-            hideSuperBubble()
+            // A gesture that dismisses the bubble is swallowed, so closing the pill never also
+            // taps the app underneath it.
+            if (swallowingGesture) {
+                if (event.actionMasked == MotionEvent.ACTION_UP ||
+                    event.actionMasked == MotionEvent.ACTION_CANCEL
+                ) swallowingGesture = false
+                return true
+            }
+            if (isSuperShown) {
+                dismissBubbleFromOutside()
+                swallowingGesture = event.actionMasked == MotionEvent.ACTION_DOWN
+                return true
+            }
+            markActiveWindow()
             showBackGesturesBriefly()
             forwardMotionEvent(event)
             moveToTopIfNeed(event)

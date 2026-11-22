@@ -3,12 +3,14 @@ package com.mja.reyamf.xposed.hook
 import android.app.AndroidAppHelper
 import android.content.Intent
 import android.content.pm.IPackageManager
+import android.view.InputEvent
 import com.github.kyuubiran.ezxhelper.init.EzXHelperInit
 import com.github.kyuubiran.ezxhelper.utils.findMethod
 import com.github.kyuubiran.ezxhelper.utils.hookAfter
 import com.github.kyuubiran.ezxhelper.utils.hookBefore
 import com.mja.reyamf.BuildConfig
 import com.mja.reyamf.common.HookPlatform
+import com.mja.reyamf.xposed.services.NavKeyRouter
 import com.mja.reyamf.xposed.services.UserService
 import com.mja.reyamf.xposed.services.YAMFManager
 import com.mja.reyamf.xposed.utils.log
@@ -122,7 +124,7 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         runCatching {
                             val displayId = XposedHelpers.getIntField(param.thisObject, "mDisplayId")
-                            YAMFManager.currentDisplayId = displayId
+                            YAMFManager.onDisplayFocusChanged(displayId)
                         }.onFailure {
                             log(TAG, "cannot read the focused display", it)
                         }
@@ -132,5 +134,30 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
         }.onFailure { e ->
             XposedBridge.log("[XposedHook] Error hooking requestFocus: ${e.message}")
         }
+
+        // The navigation bar's three buttons (and the taskbar's copy of them) send their press
+        // through InputManagerService, so this sees them before the policy hands them to a
+        // window on the default display. That is the only place a floating window can redirect
+        // them: its app lives on a virtual display the system's own handling never reaches.
+        runCatching {
+            val clazz = XposedHelpers.findClass(
+                "com.android.server.input.InputManagerService",
+                lpparam.classLoader
+            )
+            XposedBridge.hookAllMethods(
+                clazz,
+                "injectInputEvent",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (param.args.size != 2) return
+                        val event = param.args[0] as? InputEvent ?: return
+                        runCatching {
+                            // Claim success: the press was delivered to the window instead.
+                            if (NavKeyRouter.onInjectedEvent(event)) param.result = true
+                        }.onFailure { log(TAG, "cannot route the navigation key", it) }
+                    }
+                }
+            )
+        }.onFailure { log(TAG, "cannot hook InputManagerService.injectInputEvent", it) }
     }
 }
