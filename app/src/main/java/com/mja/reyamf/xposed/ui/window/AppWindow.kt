@@ -47,17 +47,19 @@ import androidx.core.view.updateLayoutParams
 import androidx.dynamicanimation.animation.FlingAnimation
 import androidx.dynamicanimation.animation.flingAnimationOf
 import androidx.wear.widget.RoundedDrawable
-import com.github.kyuubiran.ezxhelper.utils.argTypes
-import com.github.kyuubiran.ezxhelper.utils.args
-import com.github.kyuubiran.ezxhelper.utils.getObject
-import com.github.kyuubiran.ezxhelper.utils.getObjectAs
-import com.github.kyuubiran.ezxhelper.utils.invokeMethod
+import com.mja.reyamf.common.reflect.argTypes
+import com.mja.reyamf.common.reflect.args
+import com.mja.reyamf.common.reflect.getObject
+import com.mja.reyamf.common.reflect.getObjectAs
+import com.mja.reyamf.common.reflect.invokeMethod
 import com.google.android.material.color.MaterialColors
+import com.mja.reyamf.common.WindowMetrics
 import com.mja.reyamf.common.getAttr
 import com.mja.reyamf.common.onException
 import com.mja.reyamf.common.runMain
 import com.mja.reyamf.databinding.LeftBackGestureOverlayBinding
 import com.mja.reyamf.databinding.RightBackGestureOverlayBinding
+import com.mja.reyamf.databinding.WindowActionsBubbleBinding
 import com.mja.reyamf.databinding.WindowAppBinding
 import kotlinx.coroutines.withContext
 import com.mja.reyamf.xposed.services.YAMFManager
@@ -72,14 +74,10 @@ import com.mja.reyamf.xposed.utils.dpToPx
 import com.mja.reyamf.xposed.utils.getActivityInfoCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.floor
-import kotlin.math.pow
 import kotlin.math.sign
-import kotlin.math.sqrt
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.drawable.toDrawable
 
@@ -101,16 +99,19 @@ class AppWindow(
     lateinit var bindingRightBackGesture: RightBackGestureOverlayBinding
     private lateinit var virtualDisplay: VirtualDisplay
     private val taskStackListener =
+            // The callback can arrive on a binder thread and the argument list differs between
+            // Android releases, so both are checked and the work is re-dispatched to main.
+            val taskInfo = args.firstOrNull() as? ActivityManager.RunningTaskInfo
         ITaskStackListenerProxy.newInstance(context.classLoader) { args, method ->
             when (method.name) {
-                "onTaskMovedToFront" -> {
-                    onTaskMovedToFront(args[0] as ActivityManager.RunningTaskInfo)
+                "onTaskMovedToFront" -> if (taskInfo != null) {
+                    runMain { onTaskMovedToFront(taskInfo) }
                 }
-                "onTaskDescriptionChanged" -> {
-                    onTaskDescriptionChanged(args[0] as ActivityManager.RunningTaskInfo)
-                }
-                "onTaskRemovalStarted" -> {
-                    onDestroy()
+
+                "onTaskDescriptionChanged" -> if (taskInfo != null) {
+                    runMain { onTaskDescriptionChanged(taskInfo) }
+
+                "onTaskRemovalStarted" -> runMain { onDestroy() }
                 }
             }
         }
@@ -124,10 +125,8 @@ class AppWindow(
     private var halfWidth = 0
     private var halfHeight = 0
     lateinit var surfaceView: View
-    private var newDpi = calculateDpi(
-        config.defaultWindowWidth, config.defaultWindowHeight,
-        calculateScreenInches(config.defaultWindowWidth, config.defaultWindowHeight)
-    ) - config.reduceDPI
+    // Computed in doInit(); `reduceDPI` is applied exactly once, by densityFor().
+    private var newDpi = WindowMetrics.FALLBACK_DENSITY
     private var originalWidth: Int = 0
     private var originalHeight: Int = 0
     private var isResize: Boolean = true
@@ -137,9 +136,34 @@ class AppWindow(
     private var backGestureJob: Job? = null
     private var lastClickTime = 0L
     private val DOUBLE_CLICK_TIME_DELTA: Long = 300
+    /** Which control started the gesture, so the shared gesture callbacks know what was tapped. */
+    private enum class TapSource { ROOT, NOTCH }
+    private var tapSource = TapSource.ROOT
+    private lateinit var bubble: WindowActionsBubbleBinding
+    private var bubbleWidth = 0
+    private var bubbleHeight = 0
+    // The bubble lives in its own overlay window: inside the chrome it would be clipped by the
+    // window surface and could not float above the window's top edge.
+    private val bubbleParams = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        PixelFormat.TRANSLUCENT
+    ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+    }
     private var isSuperShown = false
 
     private val broadcastReceiver = object : BroadcastReceiver() {
+            if (isDestroyed) return
+            // Reposition-only by design: the window and its virtual display stay alive, so this
+            // path allocates and releases nothing. Teardown (display release included) lives in
+            // onDestroy(), which only the Close shortcut and the bar double click reach.
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_RESET_ALL_WINDOW) {
                 val lp = binding.root.layoutParams as WindowManager.LayoutParams
@@ -147,6 +171,7 @@ class AppWindow(
                     x = 0
                     y = 0
                 }
+                positionBubble()
                 Instances.windowManager.updateViewLayout(binding.root, lp)
                 val width = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 200F, context.resources.displayMetrics).toInt()
                 val height = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 300F, context.resources.displayMetrics).toInt()
@@ -164,6 +189,15 @@ class AppWindow(
 
     init {
         runCatching {
+            bubble = WindowActionsBubbleBinding.inflate(LayoutInflater.from(context))
+            bubble.root.measure(
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            )
+            bubbleWidth = bubble.root.measuredWidth
+            bubbleHeight = bubble.root.measuredHeight
+            bubbleParams.width = bubbleWidth
+            bubbleParams.height = bubbleHeight
             binding = WindowAppBinding.inflate(LayoutInflater.from(context))
             bindingLeftBackGesture = LeftBackGestureOverlayBinding.inflate(LayoutInflater.from(context))
             bindingRightBackGesture = RightBackGestureOverlayBinding.inflate(LayoutInflater.from(context))
@@ -205,13 +239,15 @@ class AppWindow(
         params.y = when (rotation) {
             Surface.ROTATION_0, Surface.ROTATION_180 -> {
                 orientation = 0
-                binding.rlBarControllerSide.isVisible = false
                 config.portraitY
             }
             Surface.ROTATION_90, Surface.ROTATION_270 -> {
                 orientation = 1
-                binding.rlBarControllerBottom.isVisible = false
                 config.landscapeY
+            }
+            else -> {
+                surfaceView = binding.viewTexture
+                binding.viewSurface.visibility = View.GONE
             }
             else -> 0
         }
@@ -288,7 +324,17 @@ class AppWindow(
                     delay(200)
 
                     withContext(Dispatchers.Main) {
+        bubble.root.visibility = View.GONE
+        runCatching {
+            Instances.windowManager.addView(bubble.root, bubbleParams)
+            bubble.root.post { positionBubble() }
+        }.onFailure { Log.e(TAG, "cannot add the action bubble", it) }
+        // Resizes, rotations and the collapse animations all land here, so the bubble follows
+        // the window's new top edge without every code path having to remember it.
+        binding.root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> positionBubble() }
+
                         animateScaleThenResize(
+            tapSource = TapSource.ROOT
                             binding.cvParent,
                             1F, 1F,
                             0F, 0F,
@@ -350,35 +396,30 @@ class AppWindow(
         binding.cvBarClickMask.setOnTouchListener { _, event ->
             moveGestureDetector.onTouchEvent(event)
             moveToTopIfNeed(event)
-            false
+            true
         }
 
-        binding.cvBarSideClickMask.setOnTouchListener { _, event ->
-            moveGestureDetector.onTouchEvent(event)
-            moveToTopIfNeed(event)
-            false
-        }
+        edgeResize(binding.ibResizeLeft, -1, 0)
+        edgeResize(binding.ibRightResize, 1, 0)
+        edgeResize(binding.ibResizeBottom, 0, 1)
+        edgeResize(binding.ibResizeBottomLeft, -1, 1)
+        edgeResize(binding.ibResizeBottomRight, 1, 1)
 
-        rightResize(binding.ibRightResize)
-
+        // The window is laid out in pixels, so the virtual display has to be created in pixels
+        // too: creating it from the raw dp values made the app launch into a much smaller
+        // display and relaunch as soon as the surface reported its real size.
+        val width = config.defaultWindowWidth.dpToPx().toInt()
+        val height = config.defaultWindowHeight.dpToPx().toInt()
+        newDpi = densityFor(width, height)
         surfaceView.setOnTouchListener(surfaceOnTouchListener)
         surfaceView.setOnGenericMotionListener(surfaceOnGenericMotionListener)
 
-        binding.ibClose.setOnClickListener {
+        bubble.ibClose.setOnClickListener {
             isResize = false
             backGestureJob?.cancel()
             backGestureJob = null
 
             binding.cvappIcon.visibility = View.INVISIBLE
-            if (orientation == 0) {
-                animateAlpha(binding.rlBarControllerBottom, 1f, 0f) {
-                    binding.rlBarControllerBottom.visibility = View.GONE
-                }
-            } else {
-                animateAlpha(binding.rlBarControllerSide, 1f, 0f) {
-                    binding.rlBarControllerSide.visibility = View.GONE
-                }
-            }
 
             CoroutineScope(Dispatchers.IO).launch {
                 delay(200)
@@ -398,64 +439,58 @@ class AppWindow(
             }
         }
 
-        binding.ibFullscreen.setOnClickListener {
-            animateAlpha(binding.clSuperLayout, 1f, 0f)
+        bubble.ibFullscreen.setOnClickListener {
+            hideSuperBubble()
             getTopRootTask()?.runCatching {
                 Instances.activityTaskManager.moveRootTaskToDisplay(taskId, 0)
             }?.onFailure { t ->
                 if (t is Error) throw t
                 TipUtil.showToast("${t.message}")
             }?.onSuccess {
-                binding.ibClose.callOnClick()
+                bubble.ibClose.callOnClick()
             }
         }
 
-        binding.ibMinimize.setOnClickListener {
-            isSuperShown = false
-            binding.apply {
-                animateAlpha(binding.clSuperLayout, 1f, 0f)
-                binding.clSuperLayout.visibility = View.GONE
-                changeMini()
-            }
+        bubble.ibMinimize.setOnClickListener {
+            hideSuperBubble()
+            changeMini()
         }
 
-        binding.ibCollapse.setOnClickListener {
-            isSuperShown = false
-            binding.apply {
-                animateAlpha(binding.clSuperLayout, 1f, 0f)
-                binding.clSuperLayout.visibility = View.GONE
-                changeCollapsed()
-            }
-            true
-        }
-
-        binding.ibSuperClose.setOnClickListener {
-            isSuperShown = false
-            animateAlpha(binding.clSuperLayout, 1f, 0f)
+        bubble.ibCollapse.setOnClickListener {
+            hideSuperBubble()
+            changeCollapsed()
         }
 
         virtualDisplay = Instances.displayManager.createVirtualDisplay(
-            "yamf${System.currentTimeMillis()}", config.defaultWindowWidth, config.defaultWindowHeight, newDpi-config.reduceDPI, null, flags
+            "yamf${System.currentTimeMillis()}", width, height, newDpi, null, flags
         )
         displayId = virtualDisplay.display.displayId
-        (Instances.windowManager as WindowManagerHidden).setDisplayImePolicy(displayId, if (config.showImeInWindow) WindowManagerHidden.DISPLAY_IME_POLICY_LOCAL else WindowManagerHidden.DISPLAY_IME_POLICY_FALLBACK_DISPLAY)
+        runCatching {
+            (Instances.windowManager as WindowManagerHidden).setDisplayImePolicy(displayId, if (config.showImeInWindow) WindowManagerHidden.DISPLAY_IME_POLICY_LOCAL else WindowManagerHidden.DISPLAY_IME_POLICY_FALLBACK_DISPLAY)
+        }.onFailure { Log.d(TAG, "cannot set the IME policy for display $displayId", it) }
         Instances.activityTaskManager.registerTaskStackListener(taskStackListener)
         (surfaceView as? TextureView)?.surfaceTextureListener = this
         (surfaceView as? SurfaceView)?.holder?.addCallback(this)
-        var failCount = 0
-        fun watchRotation() {
+        fun watchRotation(attempt: Int) {
             runCatching {
                 Instances.iWindowManager.watchRotation(rotationWatcher, displayId)
             }.onFailure {
-                failCount++
-                Log.d(TAG, "watchRotation: fail $failCount")
-                watchRotation()
+                // A retry loop keeps a transient failure from overflowing the stack.
+                Log.d(TAG, "watchRotation failed (attempt ${attempt + 1})", it)
+                if (attempt < 9) {
+                    binding.root.postDelayed({ watchRotation(attempt + 1) }, 500)
+                } else {
+                    Log.e(TAG, "watchRotation gave up after 10 attempts", it)
+                }
             }
         }
-        watchRotation()
-        context.registerReceiver(broadcastReceiver, IntentFilter(ACTION_RESET_ALL_WINDOW), Context.RECEIVER_EXPORTED)
-        val width = config.defaultWindowWidth.dpToPx().toInt()
-        val height = config.defaultWindowHeight.dpToPx().toInt()
+        watchRotation(0)
+        runCatching {
+            context.registerReceiver(broadcastReceiver, IntentFilter(ACTION_RESET_ALL_WINDOW), Context.RECEIVER_EXPORTED)
+        }.onFailure { Log.d(TAG, "cannot listen for window resets", it) }
+    @Volatile
+    private var isDestroyed = false
+
         surfaceView.updateLayoutParams {
             this.width = width
             this.height = height
@@ -504,6 +539,65 @@ class AppWindow(
         //TODO: Find me a better alternative for less resource usage instead of polling
         backGestureJob = CoroutineScope(Dispatchers.IO).launch {
             while (isActive) {
+    /** Opens or closes the action bubble, which floats clear of the window's top edge. */
+    private fun toggleSuperBubble() {
+        if (isMini || isCollapsed) return
+        isSuperShown = !isSuperShown
+        if (isSuperShown) {
+            positionBubble()
+            animateAlpha(bubble.root, 0f, 1f)
+        } else {
+            hideSuperBubble()
+        }
+    }
+
+    private fun hideSuperBubble() {
+        isSuperShown = false
+        if (::bubble.isInitialized && bubble.root.visibility == View.VISIBLE) {
+            animateAlpha(bubble.root, 1f, 0f)
+        }
+    }
+
+    /**
+     * Centres the bubble on the window and puts it just outside the window's top edge.
+     *
+     * The offsets are expressed in the same gravity space the chrome window uses instead of
+     * screen coordinates: a view's location does not match the position input events resolve to,
+     * which put the bubble a status bar too low. When the window is already flush with the top of
+     * the display there is no room above it, so the bubble drops just below the window instead.
+     */
+    private fun positionBubble() {
+        if (isDestroyed || !::bubble.isInitialized) return
+        val chromeWidth = binding.root.width
+        val chromeHeight = binding.root.height
+        if (bubbleWidth == 0 || bubbleHeight == 0 || chromeWidth == 0 || chromeHeight == 0) return
+        val gap = 8.dpToPx().toInt()
+        val chromeParams = binding.root.layoutParams as WindowManager.LayoutParams
+
+        if (orientation == 0) {
+            // Both windows are centred, so equal params.x keeps their centres aligned.
+            val chromeTop = (context.display.height - chromeHeight) / 2 + chromeParams.y
+            val hasRoomAbove = chromeTop - bubbleHeight - gap >= 0
+            bubbleParams.gravity = Gravity.CENTER
+            bubbleParams.x = chromeParams.x
+            bubbleParams.y = if (hasRoomAbove) {
+                chromeParams.y - chromeHeight / 2 - bubbleHeight / 2 - gap
+            } else {
+                chromeParams.y + chromeHeight / 2 + bubbleHeight / 2 + gap
+            }
+        } else {
+            bubbleParams.gravity = Gravity.TOP or Gravity.START
+            bubbleParams.x = chromeParams.x + (chromeWidth - bubbleWidth) / 2
+            bubbleParams.y = chromeParams.y - bubbleHeight - gap
+            if (bubbleParams.y < 0) {
+                bubbleParams.y = chromeParams.y + chromeHeight + gap
+            }
+        }
+
+        runCatching { Instances.windowManager.updateViewLayout(bubble.root, bubbleParams) }
+            .onFailure { Log.d(TAG, "cannot place the action bubble", it) }
+    }
+
                 if (isMini || isCollapsed) {
                     withContext(Dispatchers.Main) {
                         bindingLeftBackGesture.root.visibility = View.GONE
@@ -540,28 +634,29 @@ class AppWindow(
         Instances.iWindowManager.removeRotationWatcher(rotationWatcher)
         Instances.activityTaskManager.unregisterTaskStackListener(taskStackListener)
         YAMFManager.removeWindow(displayId)
-        virtualDisplay.release()
-        Instances.windowManager.removeView(binding.root)
-        Instances.windowManager.removeView(bindingLeftBackGesture.root)
-        Instances.windowManager.removeView(bindingRightBackGesture.root)
+        if (::virtualDisplay.isInitialized) {
+            runCatching { virtualDisplay.release() }
+                .onFailure { Log.d(TAG, "virtual display already released", it) }
+        }
+        releaseResources()
     }
 
-    private fun getTopRootTask(): ActivityTaskManager.RootTaskInfo? {
-        Instances.activityTaskManager.getAllRootTaskInfosOnDisplay(displayId).forEach { task ->
-            if (task.visible)
-                return task
-        }
-        return null
-    }
+    private fun getTopRootTask(): ActivityTaskManager.RootTaskInfo? = runCatching {
+        Instances.activityTaskManager.getAllRootTaskInfosOnDisplay(displayId)
+            .firstOrNull { it.visible }
+    }.onFailure { Log.d(TAG, "cannot list root tasks", it) }.getOrNull()
 
     private fun moveToTop() {
-        Instances.windowManager.removeView(bindingLeftBackGesture.root)
-        Instances.windowManager.removeView(bindingRightBackGesture.root)
-        Instances.windowManager.addView(bindingLeftBackGesture.root, bindingLeftBackGesture.root.layoutParams)
-        Instances.windowManager.addView(bindingRightBackGesture.root, bindingRightBackGesture.root.layoutParams)
+        if (isDestroyed) return
+        runCatching {
+            Instances.windowManager.removeView(bindingLeftBackGesture.root)
+            Instances.windowManager.removeView(bindingRightBackGesture.root)
+            Instances.windowManager.addView(bindingLeftBackGesture.root, bindingLeftBackGesture.root.layoutParams)
+            Instances.windowManager.addView(bindingRightBackGesture.root, bindingRightBackGesture.root.layoutParams)
 
-        Instances.windowManager.removeView(binding.root)
-        Instances.windowManager.addView(binding.root, binding.root.layoutParams)
+            Instances.windowManager.removeView(binding.root)
+            Instances.windowManager.addView(binding.root, binding.root.layoutParams)
+        }.onFailure { Log.d(TAG, "cannot raise the window", it) }
         YAMFManager.moveToTop(displayId)
     }
 
@@ -600,20 +695,17 @@ class AppWindow(
                 val runningTasks = activityManager.getRunningTasks(5)
 
                 for (task in runningTasks) {
-                    if (task.taskId == taskInfo.taskId) {
-                        val packageName = task.baseActivity?.packageName
-                        try {
-                            val packageManager = context.packageManager
-                            backgroundColor = task.taskDescription!!.backgroundColor
-                            statusBarColor = task.taskDescription!!.backgroundColor
-                            navigationBarColor = task.taskDescription!!.backgroundColor
-                            binding.appIcon.setImageDrawable(packageManager.getApplicationIcon(
-                                packageName!!
-                            ))
-                        } catch (e: PackageManager.NameNotFoundException) {
-                            e.printStackTrace()
-                        }
-                    }
+                    if (task.taskId != taskInfo.taskId) continue
+                    val packageName = task.baseActivity?.packageName ?: continue
+                    runCatching {
+                        val description = task.taskDescription
+                        backgroundColor = description?.backgroundColor ?: 0
+                        statusBarColor = backgroundColor
+                        navigationBarColor = backgroundColor
+                        binding.appIcon.setImageDrawable(
+                            context.packageManager.getApplicationIcon(packageName)
+                        )
+                    }.onFailure { Log.d(TAG, "cannot resolve the task description", it) }
                 }
             }
 
@@ -624,7 +716,7 @@ class AppWindow(
                     context.theme.getAttr(com.google.android.material.R.attr.colorOnPrimary).data
                 }
 
-                binding.ibClose.imageTintList = ColorStateList.valueOf(onStateBar)
+                bubble.ibClose.imageTintList = ColorStateList.valueOf(onStateBar)
                 binding.background.setBackgroundColor(navigationBarColor)
 
                 val onNavigationBar = if (MaterialColors.isColorLight(ColorUtils.compositeColors(navigationBarColor, backgroundColor)) xor ((context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES)) {
@@ -633,26 +725,27 @@ class AppWindow(
                     context.theme.getAttr(com.google.android.material.R.attr.colorOnPrimary).data
                 }
 
-                binding.ibMinimize.imageTintList = ColorStateList.valueOf(onNavigationBar)
-                binding.ibFullscreen.imageTintList = ColorStateList.valueOf(onNavigationBar)
+                bubble.ibMinimize.imageTintList = ColorStateList.valueOf(onNavigationBar)
+                bubble.ibFullscreen.imageTintList = ColorStateList.valueOf(onNavigationBar)
                 binding.ibRightResize.imageTintList = ColorStateList.valueOf(onNavigationBar)
             }
         }
     }
 
     fun onTaskMovedToFront(taskInfo: ActivityManager.RunningTaskInfo) {
-        if (taskInfo.getObject("displayId") == displayId) {
-            updateTask(taskInfo)
-        }
+        if (isDestroyed) return
+        runCatching {
+            if (taskInfo.getObject("displayId") == displayId) updateTask(taskInfo)
+        }.onFailure { Log.d(TAG, "onTaskMovedToFront failed", it) }
     }
 
     fun onTaskDescriptionChanged(taskInfo: ActivityManager.RunningTaskInfo) {
-        if (taskInfo.getObject("displayId") == displayId) {
-            if(!taskInfo.isVisible){
-                return
+        if (isDestroyed) return
+        runCatching {
+            if (taskInfo.getObject("displayId") == displayId && taskInfo.isVisible) {
+                updateTask(taskInfo)
             }
-            updateTask(taskInfo)
-        }
+        }.onFailure { Log.d(TAG, "onTaskDescriptionChanged failed", it) }
     }
 
     inner class RotationWatcher : IRotationWatcher.Stub() {
@@ -683,33 +776,36 @@ class AppWindow(
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-        if (isMini.not() && isCollapsed.not()) {
-            newDpi = calculateDpi(width, height, calculateScreenInches(width, height)) - config.reduceDPI
+        if (isDestroyed) return
+        runCatching {
+            resizeVirtualDisplay(surface, width, height)
+            virtualDisplay.surface = Surface(surface)
+        }.onFailure { Log.e(TAG, "cannot attach the window surface", it) }
+    }
+
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        if (isDestroyed || !isResize) return
+        runCatching { resizeVirtualDisplay(surface, width, height) }
+            .onFailure { Log.e(TAG, "cannot resize the window surface", it) }
+    }
+
+    /**
+     * Applies the reported surface size to the virtual display. The geometry always goes through
+     * [densityFor], so creation and resize cannot apply `reduceDPI` differently.
+     */
+    private fun resizeVirtualDisplay(surface: SurfaceTexture, width: Int, height: Int) {
+        if (isMini || isCollapsed) {
+            val targetWidth = width * 2 + halfWidth
+            val targetHeight = height * 2 + halfHeight
+            newDpi = densityFor(targetWidth, targetHeight)
+            virtualDisplay.resize(targetWidth, targetHeight, newDpi)
+            surface.setDefaultBufferSize(targetWidth, targetHeight)
+        } else {
+            newDpi = densityFor(width, height)
             virtualDisplay.resize(width, height, newDpi)
             surface.setDefaultBufferSize(width, height)
             halfWidth = width % 2
             halfHeight = height % 2
-        } else {
-            newDpi = calculateDpi(width, height, calculateScreenInches(width, height)) - config.reduceDPI
-            virtualDisplay.resize(width * 2 + halfWidth, height * 2 + halfHeight, newDpi)
-            surface.setDefaultBufferSize(width * 2 + halfWidth, height * 2 + halfHeight)
-        }
-        virtualDisplay.surface = Surface(surface)
-    }
-
-    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-        if (isResize) {
-            if (isMini.not()) {
-                newDpi = calculateDpi(width, height, calculateScreenInches(width, height)) - config.reduceDPI
-                virtualDisplay.resize(width, height, newDpi)
-                surface.setDefaultBufferSize(width, height)
-                halfWidth = width % 2
-                halfHeight = height % 2
-            } else {
-                newDpi = calculateDpi(width, height, calculateScreenInches(width, height)) - config.reduceDPI
-                virtualDisplay.resize(width * 2 + halfWidth, height * 2 + halfHeight, newDpi)
-                surface.setDefaultBufferSize(width * 2 + halfWidth, height * 2 + halfHeight)
-            }
         }
     }
 
@@ -738,13 +834,6 @@ class AppWindow(
                 }
                 setBackgroundWrapContent()
                 setParrentWrapContent()
-                if (orientation == 0) {
-                    binding.rlBarControllerBottom.visibility = View.VISIBLE
-                    binding.rlBarControllerSide.visibility = View.GONE
-                } else {
-                    binding.rlBarControllerSide.visibility = View.VISIBLE
-                    binding.rlBarControllerBottom.visibility = View.GONE
-                }
             } else {
                 binding.cvBackground.updateLayoutParams {
                     width = originalWidth
@@ -766,11 +855,8 @@ class AppWindow(
             }
 
             binding.ibRightResize.visibility = View.VISIBLE
-            if (orientation == 0) {
-                binding.rlBarControllerBottom.visibility = View.VISIBLE
-            } else {
-                binding.rlBarControllerSide.visibility = View.VISIBLE
-            }
+            binding.ibResizeLeft.visibility = View.VISIBLE
+            binding.ibResizeBottom.visibility = View.VISIBLE
             surfaceView.visibility = View.VISIBLE
             surfaceView.setOnTouchListener(surfaceOnTouchListener)
             surfaceView.setOnGenericMotionListener(surfaceOnGenericMotionListener)
@@ -779,8 +865,6 @@ class AppWindow(
         }
         else if (!isMini) {
             binding.rootClickMask.visibility = View.VISIBLE
-            binding.rlBarControllerBottom.visibility = View.GONE
-            binding.rlBarControllerSide.visibility = View.GONE
             isMini = true
 
             if (config.surfaceView == 1) {
@@ -832,8 +916,6 @@ class AppWindow(
             bindingRightBackGesture.root.visibility = View.VISIBLE
         } else {
             binding.rootClickMask.visibility = View.VISIBLE
-            binding.rlBarControllerBottom.visibility = View.GONE
-            binding.rlBarControllerSide.visibility = View.GONE
             collapseWindow()
             bindingLeftBackGesture.root.visibility = View.GONE
             bindingRightBackGesture.root.visibility = View.GONE
@@ -852,16 +934,6 @@ class AppWindow(
                 setParrentWrapContent()
                 binding.cvappIcon.visibility = View.VISIBLE
 
-                CoroutineScope(Dispatchers.Main).launch {
-                    delay(200)
-
-                    if (orientation == 0) {
-                        binding.rlBarControllerBottom.visibility = View.VISIBLE
-                    } else {
-                        binding.rlBarControllerSide.visibility = View.VISIBLE
-                    }
-                }
-
                 binding.cvappIcon.visibility = View.GONE
                 isResize = true
             }
@@ -877,9 +949,13 @@ class AppWindow(
             animateResize(binding.cvBackground, binding.cvBackground.width, 0, binding.cvBackground.height, 0, context) {
                 binding.cvappIcon.visibility = View.VISIBLE
                 binding.background.visibility = View.GONE
+                        val windowParams = binding.root.layoutParams as WindowManager.LayoutParams
+                        beginWindowX = windowParams.x
+                        beginWindowY = windowParams.y
                 animateResize(binding.appIcon, 0, 40.dpToPx().toInt(), 0, 40.dpToPx().toInt(), context)
 
                 isResize = true
+
             }
         }
     }
@@ -889,28 +965,44 @@ class AppWindow(
         val y = (height / context.resources.displayMetrics.ydpi).pow(2)
 
         return sqrt(x + y)
+
     }
 
+                            val width = binding.vSizePreviewer.width
+                            val height = binding.vSizePreviewer.height
     private fun calculateDpi(width: Int, height: Int, screenSizeInInches: Float): Int {
         val widthSqr = width.toFloat().pow(2)
         val heightSqr = height.toFloat().pow(2)
         val diagonalPixels = sqrt(widthSqr + heightSqr)
+                            val windowParams = binding.root.layoutParams as WindowManager.LayoutParams
+                            windowParams.x = beginWindowX + horizontal * (width - beginWidth) / 2
+                            windowParams.y = beginWindowY + vertical * (height - beginHeight) / 2
+                            runCatching { Instances.windowManager.updateViewLayout(binding.root, windowParams) }
+                                .onFailure { Log.d(TAG, "cannot move the window after a resize", it) }
+                            positionBubble()
 
         return floor(diagonalPixels / screenSizeInInches).toInt()
     }
 
-    private fun rightResize(ibResize: ImageButton) {
-        ibResize.setOnTouchListener(object : View.OnTouchListener {
+    /**
+     * Resizes the window from one edge: [horizontal] is -1 for the left edge and +1 for the right,
+     * [vertical] is +1 for the bottom edge, and 0 means that axis is not draggable. The window is
+     * centred on its own size, so it slides by half the change to keep the opposite edge in place.
+     */
+    private fun edgeResize(handle: View, horizontal: Int, vertical: Int) {
+        handle.setOnTouchListener(object : View.OnTouchListener {
             var beginX = 0F
             var beginY = 0F
             var beginWidth = 0
             var beginHeight = 0
+            var beginWindowX = 0
+            var beginWindowY = 0
 
-            var offsetX = 0F
-            var offsetY = 0F
-
+        } catch (t: Throwable) {
+            Log.e(TAG, "cannot forward the touch to the virtual display", t)
+        } finally {
             override fun onTouch(v: View, event: MotionEvent): Boolean {
-                when(event.action) {
+                when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         beginX = event.rawX
                         beginY = event.rawY
@@ -922,22 +1014,19 @@ class AppWindow(
                         binding.cvParent.strokeWidth = 0
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        offsetX = event.rawX - beginX
-                        offsetY = event.rawY - beginY
+                        val minimum = 150.dpToPx().toInt()
+                        val targetWidth = beginWidth + (event.rawX - beginX).toInt() * horizontal
+                        val targetHeight = beginHeight + (event.rawY - beginY).toInt() * vertical
                         binding.vSizePreviewer.updateLayoutParams {
-                            val targetWidth = beginWidth + offsetX.toInt()
-                            if (targetWidth > 0)
-                                width = targetWidth
-                            val targetHeight = beginHeight + offsetY.toInt()
-                            if (targetHeight > 0)
-                                height = targetHeight
+                            width = targetWidth.coerceAtLeast(minimum)
+                            height = targetHeight.coerceAtLeast(minimum)
                         }
                     }
                     MotionEvent.ACTION_UP -> {
                         binding.vSizePreviewer.post {
                             surfaceView.updateLayoutParams {
-                                width = binding.vSizePreviewer.width
-                                height = binding.vSizePreviewer.height
+                                this.width = width
+                                this.height = height
                             }
                         }
 
@@ -952,8 +1041,9 @@ class AppWindow(
     }
 
     fun forwardMotionEvent(event: MotionEvent) {
-        if (!isSuperShown) {
-            val newEvent = MotionEvent.obtain(event)
+        if (isSuperShown) return
+        val newEvent = MotionEvent.obtain(event)
+        try {
             newEvent.invokeMethod("setDisplayId", args(displayId), argTypes(Integer.TYPE))
             Instances.inputManager.injectInputEvent(newEvent, 0)
             newEvent.recycle()
@@ -980,16 +1070,22 @@ class AppWindow(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        virtualDisplay.surface = holder.surface
+        if (isDestroyed) return
+        runCatching { virtualDisplay.surface = holder.surface }
+            .onFailure { Log.e(TAG, "cannot attach the window surface", it) }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        newDpi = calculateDpi(width, height, calculateScreenInches(width, height )) - config.reduceDPI
-        virtualDisplay.resize(width, height, newDpi)
+        if (isDestroyed) return
+        runCatching {
+            newDpi = densityFor(width, height)
+            virtualDisplay.resize(width, height, newDpi)
+        }.onFailure { Log.e(TAG, "cannot resize the window surface", it) }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        virtualDisplay.surface = null
+        runCatching { virtualDisplay.surface = null }
+            .onFailure { Log.d(TAG, "the virtual display is already released", it) }
     }
 
     private val moveGestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
@@ -1001,6 +1097,7 @@ class AppWindow(
         var lastY = 0F
         var last2X = 0F
         var last2Y = 0F
+                    positionBubble()
 
         override fun onDown(e: MotionEvent): Boolean {
             xAnimation?.cancel()
@@ -1014,6 +1111,7 @@ class AppWindow(
 
         override fun onScroll(
             e1: MotionEvent?,
+                    positionBubble()
             e2: MotionEvent,
             distanceX: Float,
             distanceY: Float
@@ -1022,7 +1120,9 @@ class AppWindow(
             val params = binding.root.layoutParams as WindowManager.LayoutParams
             params.x = (startX + (e2.rawX - e1.rawX)).toInt()
             params.y = (startY + (e2.rawY - e1.rawY)).toInt()
-            Instances.windowManager.updateViewLayout(binding.root, params)
+            runCatching { Instances.windowManager.updateViewLayout(binding.root, params) }
+                .onFailure { Log.d(TAG, "cannot move the window", it) }
+            positionBubble()
             last2X = lastX
             last2Y = lastY
             lastX = e2.rawX
@@ -1070,8 +1170,19 @@ class AppWindow(
         }
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-            if (isMini && !isCollapsed) changeMini()
-            else if (!isMini && isCollapsed) changeCollapsed()
+            when (tapSource) {
+                TapSource.NOTCH -> toggleSuperBubble()
+                TapSource.ROOT -> if (isMini && !isCollapsed) changeMini()
+                else if (!isMini && isCollapsed) changeCollapsed()
+            }
+            return true
+        }
+
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            // The notch keeps the close shortcut; taps on the window content belong to the app.
+            if (tapSource != TapSource.NOTCH) return false
+            hideSuperBubble()
+            bubble.ibClose.performClick()
             return true
         }
     })

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hosted in its own overlay window so it can float above the freeform window's top edge
+     without being clipped by that window's surface, and still receive its own taps. -->
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/bubble"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:theme="@style/Theme.Material3.DayNight"
+    app:cardBackgroundColor="?attr/colorSurface"
+    app:cardCornerRadius="22dp"
+    app:cardElevation="10dp"
+    app:strokeColor="@color/transparentOutline"
+    app:strokeWidth="1dp">
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingHorizontal="6dp">
+
+        <ImageButton
+            android:id="@+id/ib_minimize"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/minimize_desc"
+            android:scaleType="center"
+            android:src="@drawable/ic_minimize" />
+
+        <ImageButton
+            android:id="@+id/ib_fullscreen"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/fullscreen_desc"
+            android:scaleType="center"
+            android:src="@drawable/ic_maximize" />
+
+        <ImageButton
+            android:id="@+id/ib_collapse"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/fullscreen_desc"
+            android:scaleType="center"
+            android:src="@drawable/ic_collapse" />
+
+        <ImageButton
+            android:id="@+id/ib_close"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/close_desc"
+            android:scaleType="center"
+            android:src="@drawable/ic_close" />
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>
