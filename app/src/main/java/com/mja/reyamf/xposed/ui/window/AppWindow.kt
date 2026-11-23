@@ -36,6 +36,7 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.TextureView
+import android.view.animation.DecelerateInterpolator
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -145,6 +146,8 @@ class AppWindow(
     /** Which control started the gesture, so the shared gesture callbacks know what was tapped. */
     private enum class TapSource { ROOT, NOTCH }
     private var tapSource = TapSource.ROOT
+    /** Set once a drag has minimised the window, so the rest of that gesture leaves it alone. */
+    private var collapsingByDrag = false
     private lateinit var bubble: WindowActionsBubbleBinding
     private var bubbleWidth = 0
     private var bubbleHeight = 0
@@ -618,6 +621,72 @@ class AppWindow(
             .onFailure { Log.d(TAG, "cannot place the action bubble", it) }
     }
 
+    private fun screenWidth(): Int = runCatching { context.display.width }
+        .getOrDefault(context.resources.displayMetrics.widthPixels)
+
+    private fun screenHeight(): Int = runCatching { context.display.height }
+        .getOrDefault(context.resources.displayMetrics.heightPixels)
+
+    private fun isCentredVertically(params: WindowManager.LayoutParams): Boolean =
+        (params.gravity and Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL
+
+    private fun isCentredHorizontally(params: WindowManager.LayoutParams): Boolean =
+        (params.gravity and Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL
+
+    /** Lowest params.y that keeps the window's top edge, and its three-dot handle, on screen. */
+    private fun minWindowY(): Int {
+        val params = binding.root.layoutParams as WindowManager.LayoutParams
+        return if (isCentredVertically(params)) {
+            (binding.root.height - screenHeight()) / 2
+        } else {
+            0
+        }
+    }
+
+    /** Horizontal centre of the three dots on screen, accounting for the window's gravity. */
+    private fun notchCenterX(params: WindowManager.LayoutParams, windowWidth: Int): Int =
+        if (isCentredHorizontally(params)) {
+            screenWidth() / 2 + params.x
+        } else {
+            params.x + windowWidth / 2
+        }
+
+    /** Clamps params.x so the whole window stays within the display sideways. */
+    private fun clampWindowX(params: WindowManager.LayoutParams, windowWidth: Int): Int {
+        val maxX = (screenWidth() - windowWidth).coerceAtLeast(0)
+        return if (isCentredHorizontally(params)) {
+            params.x.coerceIn(-maxX / 2, maxX / 2)
+        } else {
+            params.x.coerceIn(0, maxX)
+        }
+    }
+
+    private fun updateWindowLayout(params: WindowManager.LayoutParams) {
+        runCatching { Instances.windowManager.updateViewLayout(binding.root, params) }
+            .onFailure { Log.d(TAG, "cannot move the window", it) }
+    }
+
+    /** Brings a resized or minimised window back into view. */
+    private fun ensureWindowVisible() {
+        if (isDestroyed || !::binding.isInitialized) return
+        val params = binding.root.layoutParams as? WindowManager.LayoutParams ?: return
+        val w = binding.root.width
+        val h = binding.root.height
+        if (w <= 0 || h <= 0) return
+        val newX = clampWindowX(params, w)
+        val newY = if (isCentredVertically(params)) {
+            val maxY = ((screenHeight() - h) / 2).coerceAtLeast(0)
+            params.y.coerceIn(-maxY, maxY)
+        } else {
+            params.y.coerceIn(0, (screenHeight() - h).coerceAtLeast(0))
+        }
+        if (newX == params.x && newY == params.y) return
+        params.x = newX
+        params.y = newY
+        updateWindowLayout(params)
+        positionBubble()
+    }
+
     private fun updateTask(taskInfo: ActivityManager.RunningTaskInfo) {
         RunMainThreadQueue.add {
             if (taskInfo.isVisible.not()) {
@@ -900,18 +969,42 @@ class AppWindow(
 
     private fun collapseWindow() {
         isCollapsed = true
-
-        CoroutineScope(Dispatchers.Main).launch {
-            delay(200)
-
-            animateResize(binding.cvBackground, binding.cvBackground.width, 0, binding.cvBackground.height, 0, context) {
-                binding.cvappIcon.visibility = View.VISIBLE
+        val background = binding.cvBackground
+        binding.cvappIcon.visibility = View.VISIBLE
+        // Scale the content down instead of relaying it out every frame: resizing the embedded
+        // SurfaceView relayouts the virtual display on every frame, which is what made the
+        // minimisation look choppy. The pivot at the top-left lines the collapse up with the
+        // icon that takes its place.
+        background.animate().cancel()
+        background.pivotX = 0f
+        background.pivotY = 0f
+        background.animate()
+            .scaleX(0.06f)
+            .scaleY(0.06f)
+            .alpha(0.2f)
+            .setDuration(300L)
+            .setInterpolator(DecelerateInterpolator())
+            .withEndAction {
+                background.animate().cancel()
+                background.scaleX = 1f
+                background.scaleY = 1f
+                background.alpha = 1f
+                background.updateLayoutParams {
+                    width = 0
+                    height = 0
+                }
                 binding.background.visibility = View.GONE
-                animateResize(binding.appIcon, 0, 40.dpToPx().toInt(), 0, 40.dpToPx().toInt(), context)
-
                 isResize = true
+                binding.root.post { ensureWindowVisible() }
             }
-        }
+            .start()
+        // Grow the icon in while the content shrinks, all in one motion.
+        animateResize(
+            binding.appIcon,
+            0, 40.dpToPx().toInt(),
+            0, 40.dpToPx().toInt(),
+            context
+        )
     }
 
     /**
@@ -1161,6 +1254,7 @@ class AppWindow(
         var last2Y = 0F
 
         override fun onDown(e: MotionEvent): Boolean {
+            collapsingByDrag = false
             xAnimation?.cancel()
             yAnimation?.cancel()
             val params = binding.root.layoutParams as WindowManager.LayoutParams
@@ -1177,11 +1271,28 @@ class AppWindow(
             distanceY: Float
         ): Boolean {
             e1 ?: return false
+            // A drag that already minimised the window must not keep moving the icon.
+            if (collapsingByDrag) return true
             val params = binding.root.layoutParams as WindowManager.LayoutParams
             params.x = (startX + (e2.rawX - e1.rawX)).toInt()
             params.y = (startY + (e2.rawY - e1.rawY)).toInt()
-            runCatching { Instances.windowManager.updateViewLayout(binding.root, params) }
-                .onFailure { Log.d(TAG, "cannot move the window", it) }
+            // FLAG_LAYOUT_NO_LIMITS lets the window slide up until the three-dot handle is off
+            // screen, where it can no longer be grabbed. Keep the window's top edge on screen.
+            params.y = params.y.coerceAtLeast(minWindowY())
+            val windowWidth = binding.root.width
+            if (windowWidth > 0 &&
+                notchCenterX(params, windowWidth).let { it < 0 || it > screenWidth() }
+            ) {
+                // The three dots left the screen sideways, so minimise instead of leaving the
+                // window stranded off the edge.
+                collapsingByDrag = true
+                params.x = clampWindowX(params, windowWidth)
+                updateWindowLayout(params)
+                positionBubble()
+                if (!isMini && !isCollapsed) changeCollapsed()
+                return true
+            }
+            updateWindowLayout(params)
             positionBubble()
             last2X = lastX
             last2Y = lastY

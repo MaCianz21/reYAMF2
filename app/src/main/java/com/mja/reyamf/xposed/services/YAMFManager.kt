@@ -198,7 +198,12 @@ object YAMFManager : IYAMFManager.Stub() {
      */
     fun onDisplayFocusChanged(displayId: Int) {
         currentDisplayId = displayId
-        activeDisplayId = if (windowsByDisplay.containsKey(displayId)) displayId else -1
+        // Only a display that hosts a window may claim the navigation buttons. Focus moving to a
+        // display without one (the launcher coming back after a window opens, or an app behind the
+        // floating windows) must not steal them: the launcher resuming on the default display is
+        // exactly what cleared the target right after a window was opened and left the buttons
+        // acting on the system instead of the window.
+        windowsByDisplay[displayId]?.let { activeDisplayId = displayId }
     }
 
     /** The window the navigation bar buttons should act on, if any. */

@@ -4,6 +4,7 @@ import android.view.Display
 import android.view.InputEvent
 import android.view.KeyEvent
 import com.mja.reyamf.common.reflect.invokeMethodAs
+import com.mja.reyamf.xposed.utils.log
 
 /**
  * Sends the navigation bar's back, home and recents buttons to the floating window the user
@@ -16,6 +17,8 @@ import com.mja.reyamf.common.reflect.invokeMethodAs
  * default display, and BACK only leaves the window's app alone while the window is on screen.
  */
 object NavKeyRouter {
+    private const val TAG = "reYAMF_NavKey"
+
     /** Set while a press we handled is still down, so its release is swallowed too. */
     @Volatile
     private var consumedDown = false
@@ -27,7 +30,10 @@ object NavKeyRouter {
         // getDisplayId() is a hidden API, hence the reflective read.
         val displayId = runCatching { key.invokeMethodAs<Int>("getDisplayId") }
             .getOrDefault(Display.DEFAULT_DISPLAY)
-        if (displayId != Display.DEFAULT_DISPLAY) return false
+        // The navigation bar's injected keys carry either -1 (display id unset) or 0 (the default
+        // display); only our own re-injections carry a window's virtual display id (> 0). Filtering
+        // on "== 0" dropped every real press, so anything above the default display is our echo.
+        if (displayId > Display.DEFAULT_DISPLAY) return false
         if (!isNavigationKey(key.keyCode)) return false
 
         if (key.action != KeyEvent.ACTION_DOWN) {
@@ -36,7 +42,12 @@ object NavKeyRouter {
             return wasHandled
         }
 
-        val window = YAMFManager.activeWindow()?.takeIf { it.canReceiveKeys } ?: return false
+        val window = YAMFManager.activeWindow()
+        if (window == null || !window.canReceiveKeys) {
+            log(TAG, "nav ${key.keyCode} on display $displayId ignored: no active window")
+            return false
+        }
+        log(TAG, "nav ${key.keyCode} on display $displayId -> window ${window.displayId}")
         consumedDown = true
         when (key.keyCode) {
             KeyEvent.KEYCODE_BACK -> window.forwardKey(KeyEvent.KEYCODE_BACK)

@@ -101,6 +101,27 @@ so sign them with your own key before installing. Useful tasks:
 - Keyboard might not show up when trying to type inside the floating window
 - Navigation buttons acts on the background application even when the foreground window is focused
 
+## Changelog
+
+### 1.1.4
+
+- Opening an app that is already shown in a window now raises that window instead of creating
+  a duplicate; the first window no longer ends up mirroring the system UI.
+- Back, Home and Recents act on the focused floating window: Back is sent to the window's app,
+  Home minimises it, and Recents opens the module's app switcher.
+- The three-dot handle is transparent and sits in a padded band, so it no longer covers app
+  content, and the window actions open in a floating bubble over the handle. Tapping outside the
+  bubble closes it.
+- The window can no longer be dragged under the top bar, where the handle was unreachable; when
+  the three dots leave the screen sideways the window minimises instead of being stranded
+  off-screen.
+- The minimise-to-icon animation is smoother: it scales the content instead of relaying out the
+  embedded surface on every frame.
+- The version is kept in `app/build.gradle.kts` (`baseVersionName` / `versionCode`), and
+  `scripts/build-dist.sh` builds and signs both flavours into `app/build/dist`.
+
+Earlier releases are listed on the releases page.
+
 ## Credits
 
 - [duzhaokun123](https://github.com/duzhaokun123) and [kaii-lb](https://github.com/kaii-lb/YAMFsquared)
