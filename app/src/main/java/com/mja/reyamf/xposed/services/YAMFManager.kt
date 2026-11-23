@@ -206,8 +206,15 @@ object YAMFManager : IYAMFManager.Stub() {
         windowsByDisplay[displayId]?.let { activeDisplayId = displayId }
     }
 
-    /** The window the navigation bar buttons should act on, if any. */
-    fun activeWindow(): AppWindow? = windowsByDisplay[activeDisplayId]
+    /**
+     * The window the navigation bar buttons should act on, if any. Focus tracking can miss a
+     * transient change, so a lone open window is used as a fallback instead of handing the
+     * buttons to the app behind it.
+     */
+    fun activeWindow(): AppWindow? {
+        windowsByDisplay[activeDisplayId]?.let { return it }
+        return if (windowsByDisplay.size == 1) windowsByDisplay.values.firstOrNull() else null
+    }
 
     /** Hands the navigation bar back to the system after the window stepped aside. */
     fun clearActiveWindow() {
@@ -290,6 +297,9 @@ object YAMFManager : IYAMFManager.Stub() {
             .onFailure { log(TAG, "ignoring malformed config", it) }
             .getOrNull() ?: return
         config = parsed
+        // The IME policy is per display, so a change to "Show IME in window" only becomes visible
+        // in windows that are already open when it is pushed to them.
+        runMain { windowsByDisplay.values.forEach { it.applyImePolicy() } }
         runIO {
             runCatching { configFile.writeText(newConfig) }
                 .onFailure { log(TAG, "cannot persist the config", it) }

@@ -35,6 +35,9 @@ object NavKeyRouter {
         // on "== 0" dropped every real press, so anything above the default display is our echo.
         if (displayId > Display.DEFAULT_DISPLAY) return false
         if (!isNavigationKey(key.keyCode)) return false
+        if (key.action == KeyEvent.ACTION_DOWN) {
+            log(TAG, "nav ${key.keyCode} injected on display $displayId")
+        }
 
         if (key.action != KeyEvent.ACTION_DOWN) {
             val wasHandled = consumedDown
@@ -44,19 +47,25 @@ object NavKeyRouter {
 
         val window = YAMFManager.activeWindow()
         if (window == null || !window.canReceiveKeys) {
-            log(TAG, "nav ${key.keyCode} on display $displayId ignored: no active window")
+            log(TAG, "nav ${key.keyCode} on display $displayId ignored: no window ready for keys")
             return false
         }
         log(TAG, "nav ${key.keyCode} on display $displayId -> window ${window.displayId}")
         consumedDown = true
-        when (key.keyCode) {
-            KeyEvent.KEYCODE_BACK -> window.forwardKey(KeyEvent.KEYCODE_BACK)
-            KeyEvent.KEYCODE_HOME -> {
-                window.navHome()
-                YAMFManager.clearActiveWindow()
-            }
+        // The press is already claimed, so a failing action must not let it fall through to the
+        // display behind the window (and must not skip the matching release).
+        runCatching {
+            when (key.keyCode) {
+                KeyEvent.KEYCODE_BACK -> window.forwardKey(KeyEvent.KEYCODE_BACK)
+                KeyEvent.KEYCODE_HOME -> {
+                    window.navHome()
+                    YAMFManager.clearActiveWindow()
+                }
 
-            KeyEvent.KEYCODE_APP_SWITCH -> YAMFManager.openAppList()
+                KeyEvent.KEYCODE_APP_SWITCH -> YAMFManager.openAppList()
+            }
+        }.onFailure {
+            log(TAG, "cannot act on nav ${key.keyCode} for window ${window.displayId}", it)
         }
         return true
     }

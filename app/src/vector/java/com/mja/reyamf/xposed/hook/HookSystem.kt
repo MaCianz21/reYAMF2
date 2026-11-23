@@ -139,24 +139,34 @@ object HookSystem {
      * window can claim them from.
      */
     private fun hookInjectedInput(module: XposedModule, classLoader: ClassLoader) {
-        runCatching {
-            val inject = loadClass("com.android.server.input.InputManagerService", classLoader).findMethod {
-                name == "injectInputEvent" && parameterCount == 2 &&
-                        parameterTypes[0] == InputEvent::class.java
-            }
-            deoptimize(module, inject)
-
-            inject.createHook {
-                before { param ->
-                    runCatching {
-                        // Claim success: the press was delivered to the window instead.
-                        if (NavKeyRouter.onInjectedEvent(param.args.getOrNull(0) as? InputEvent)) {
-                            param.result = true
-                        }
-                    }.onFailure { log(TAG, "cannot route the navigation key", it) }
+        val inputManagerService = runCatching {
+            loadClass("com.android.server.input.InputManagerService", classLoader)
+        }.getOrElse {
+            log(TAG, "cannot load InputManagerService", it)
+            return
+        }
+        // Both the binder entry point and the target-specific method it delegates to are hooked:
+        // the exact one called differs between releases, and either can be the first to see a key.
+        listOf("injectInputEvent", "injectInputEventToTarget").forEach { methodName ->
+            runCatching {
+                val inject = inputManagerService.findMethod {
+                    name == methodName && parameterTypes.isNotEmpty() &&
+                            InputEvent::class.java.isAssignableFrom(parameterTypes[0])
                 }
-            }
-        }.onFailure { log(TAG, "cannot hook InputManagerService.injectInputEvent", it) }
+                deoptimize(module, inject)
+                inject.createHook {
+                    before { param ->
+                        runCatching {
+                            // Claim success: the press was delivered to the window instead.
+                            if (NavKeyRouter.onInjectedEvent(param.args.getOrNull(0) as? InputEvent)) {
+                                param.result = true
+                            }
+                        }.onFailure { log(TAG, "cannot route the navigation key", it) }
+                    }
+                }
+                log(TAG, "hooked InputManagerService.$methodName")
+            }.onFailure { log(TAG, "cannot hook InputManagerService.$methodName", it) }
+        }
     }
 
     private fun deoptimize(module: XposedModule, executable: Executable) {

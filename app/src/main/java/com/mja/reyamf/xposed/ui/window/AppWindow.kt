@@ -38,6 +38,7 @@ import android.view.SurfaceView
 import android.view.TextureView
 import android.view.animation.DecelerateInterpolator
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.WindowManagerHidden
@@ -80,6 +81,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.sign
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.drawable.toDrawable
@@ -267,11 +269,16 @@ class AppWindow(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            // FLAG_NOT_FOCUSABLE without FLAG_ALT_FOCUSABLE_IM on purpose. Together the two flags
+            // request that this overlay become the input method target of the tablet's own display
+            // even though it cannot receive text, and the window manager then moves the chrome
+            // inset by the IME. That made the keyboard the window's app asked for (drawn on the
+            // tablet display while the window's display uses the fallback IME policy) get laid out
+            // and immediately hidden again, so it appeared once and then never came back.
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
-                    WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         )
 
@@ -372,6 +379,8 @@ class AppWindow(
             true
         }
 
+        setupCollapsedIconGesture()
+
         edgeResize(binding.ibResizeLeft, -1, 0)
         edgeResize(binding.ibRightResize, 1, 0)
         edgeResize(binding.ibResizeBottom, 0, 1)
@@ -434,9 +443,11 @@ class AppWindow(
             "yamf${System.currentTimeMillis()}", width, height, newDpi, null, flags
         )
         displayId = virtualDisplay.display.displayId
-        runCatching {
-            (Instances.windowManager as WindowManagerHidden).setDisplayImePolicy(displayId, if (config.showImeInWindow) WindowManagerHidden.DISPLAY_IME_POLICY_LOCAL else WindowManagerHidden.DISPLAY_IME_POLICY_FALLBACK_DISPLAY)
-        }.onFailure { Log.d(TAG, "cannot set the IME policy for display $displayId", it) }
+        applyImePolicy()
+        // The display is brand new, so the window manager may not have it registered yet and
+        // silently ignore the policy. A second attempt once the window is laid out costs nothing
+        // when the first one took effect (the policy is compared before being applied).
+        binding.root.post { applyImePolicy() }
         Instances.activityTaskManager.registerTaskStackListener(taskStackListener)
         (surfaceView as? TextureView)?.surfaceTextureListener = this
         (surfaceView as? SurfaceView)?.holder?.addCallback(this)
@@ -599,6 +610,10 @@ class AppWindow(
      */
     private fun positionBubble() {
         if (isDestroyed || !::bubble.isInitialized) return
+        // The bubble is repositioned on every window layout. While it is hidden that would push a
+        // WindowManager transaction on every animation frame, which made minimising stutter; only
+        // a visible bubble needs to follow the window.
+        if (!isSuperShown) return
         val chromeWidth = binding.root.width
         val chromeHeight = binding.root.height
         if (bubbleWidth == 0 || bubbleHeight == 0 || chromeWidth == 0 || chromeHeight == 0) return
@@ -919,6 +934,74 @@ class AppWindow(
         }
     }
 
+    /**
+     * Drags and taps on the minimised window's icon.
+     *
+     * Once collapsed the icon covers almost the whole window and, being clickable, consumed every
+     * gesture itself: only the few dp of padding around it reached the move mask, so the bubble
+     * could barely be dragged. The icon is the handle now: a drag moves the window, a tap restores
+     * it.
+     */
+    private fun setupCollapsedIconGesture() {
+        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        var dragging = false
+
+        binding.cvappIcon.setOnTouchListener { _, event ->
+            if (isDestroyed) return@setOnTouchListener false
+            val windowParams = binding.root.layoutParams as WindowManager.LayoutParams
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    markActiveWindow()
+                    downX = event.rawX
+                    downY = event.rawY
+                    startX = windowParams.x
+                    startY = windowParams.y
+                    dragging = false
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downX
+                    val dy = event.rawY - downY
+                    if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                        dragging = true
+                    }
+                    if (dragging) {
+                        windowParams.x = (startX + dx).toInt()
+                        windowParams.y = (startY + dy).toInt().coerceAtLeast(minWindowY())
+                        val windowWidth = binding.root.width
+                        if (windowWidth > 0) {
+                            windowParams.x = clampWindowX(windowParams, windowWidth)
+                        }
+                        updateWindowLayout(windowParams)
+                        positionBubble()
+                    }
+                }
+
+                MotionEvent.ACTION_UP -> if (dragging) {
+                    moveToTopIfNeed(event)
+                } else if (isCollapsed) {
+                    changeCollapsed()
+                } else if (isMini) {
+                    changeMini()
+                }
+            }
+            true
+        }
+    }
+
+    private fun showResizeHandles(show: Boolean) {
+        val visibility = if (show) View.VISIBLE else View.GONE
+        binding.ibResizeLeft.visibility = visibility
+        binding.ibRightResize.visibility = visibility
+        binding.ibResizeBottom.visibility = visibility
+        binding.ibResizeBottomLeft.visibility = visibility
+        binding.ibResizeBottomRight.visibility = visibility
+    }
+
     private fun setBackgroundWrapContent() {
         val layoutParams = binding.cvBackground.layoutParams
         layoutParams.width = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -951,7 +1034,14 @@ class AppWindow(
 
     private fun expandWindow() {
         isCollapsed = false
+        // The icon can be tapped while the collapse is still animating, and that animation ends by
+        // hiding the background: dropping it here is what lets the window be restored at any time.
+        binding.cvBackground.animate().cancel()
+        binding.cvBackground.scaleX = 1f
+        binding.cvBackground.scaleY = 1f
+        binding.cvBackground.alpha = 1f
         binding.background.visibility = View.VISIBLE
+        showResizeHandles(true)
 
         animateResize(
             binding.appIcon, 40.dpToPx().toInt(), 0, 40.dpToPx().toInt(), 0, context) {
@@ -971,6 +1061,9 @@ class AppWindow(
         isCollapsed = true
         val background = binding.cvBackground
         binding.cvappIcon.visibility = View.VISIBLE
+        // The handles are laid out against the full-size window; once collapsed they would sit on
+        // top of the icon and swallow the tap that is supposed to restore it.
+        showResizeHandles(false)
         // Scale the content down instead of relaying it out every frame: resizing the embedded
         // SurfaceView relayouts the virtual display on every frame, which is what made the
         // minimisation look choppy. The pivot at the top-left lines the collapse up with the
@@ -1005,6 +1098,29 @@ class AppWindow(
             0, 40.dpToPx().toInt(),
             context
         )
+    }
+
+    /**
+     * Applies the window's IME policy to its virtual display, which decides whether the keyboard
+     * is drawn inside the window or on the tablet's own display.
+     *
+     * The policy is stored per display and was previously written only when the window was
+     * created, so flipping "Show IME in window" had no effect on the windows already open and the
+     * keyboard of some windows stayed on the other display. The current policy is compared first,
+     * because setting it reconfigures the display.
+     */
+    fun applyImePolicy(force: Boolean = false) {
+        if (isDestroyed || displayId <= 0) return
+        val policy = if (config.showImeInWindow) {
+            WindowManagerHidden.DISPLAY_IME_POLICY_LOCAL
+        } else {
+            WindowManagerHidden.DISPLAY_IME_POLICY_FALLBACK_DISPLAY
+        }
+        val hidden = Instances.windowManager as WindowManagerHidden
+        val current = runCatching { hidden.getDisplayImePolicy(displayId) }.getOrNull()
+        if (!force && current == policy) return
+        runCatching { hidden.setDisplayImePolicy(displayId, policy) }
+            .onFailure { Log.e(TAG, "cannot set the IME policy for display $displayId", it) }
     }
 
     /**
@@ -1150,6 +1266,9 @@ class AppWindow(
         if (isMini) changeMini()
         moveToTop()
         markActiveWindow()
+        // Re-check the IME policy too: it is stored on the display and can differ per window when
+        // the setting was changed after this one was created.
+        applyImePolicy()
         runCatching {
             val taskId = startCmd?.taskId
             if (startCmd != null && startCmd.canMoveTask && taskId != null) {
@@ -1176,8 +1295,14 @@ class AppWindow(
 
     /** The navigation bar's home button: the window steps aside down to its app icon. */
     fun navHome() {
-        hideSuperBubble()
-        if (!isMini && !isCollapsed) changeCollapsed()
+        // The press arrives on the input dispatcher's binder thread, and collapsing animates the
+        // chrome; touching the hierarchy from that thread throws, which left the button doing
+        // nothing at all. Hand it to the thread that built the window instead.
+        runMain {
+            if (isDestroyed) return@runMain
+            hideSuperBubble()
+            if (!isMini && !isCollapsed) changeCollapsed()
+        }
     }
 
     fun forwardMotionEvent(event: MotionEvent) {
@@ -1232,6 +1357,10 @@ class AppWindow(
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         if (isDestroyed) return
+        // Collapse and expand change the view size; resizing the virtual display for every
+        // intermediate size (or down to zero) makes the transition stutter and the app re-layout.
+        // Keep the display at its real size and let the surface be scaled instead.
+        if (!isResize || width <= 0 || height <= 0) return
         runCatching {
             newDpi = densityFor(width, height)
             virtualDisplay.resize(width, height, newDpi)
@@ -1307,46 +1436,18 @@ class AppWindow(
             velocityX: Float,
             velocityY: Float
         ): Boolean {
-            e1 ?: return false
-            if (e1.source == InputDevice.SOURCE_MOUSE) return false
-            val params = binding.root.layoutParams as WindowManager.LayoutParams
-
-            runCatching {
-                if (sign(velocityX) != sign(e2.rawX - last2X)) return@runCatching
-                xAnimation = flingAnimationOf({
-                    params.x = it.toInt()
-                    Instances.windowManager.updateViewLayout(binding.root, params)
-                    positionBubble()
-                }, {
-                    params.x.toFloat()
-                })
-                    .setStartVelocity(velocityX)
-                    .setMinValue(0F)
-                    .setMaxValue(context.display.width.toFloat() - binding.root.width)
-                xAnimation?.start()
-            }
-            runCatching {
-                if (sign(velocityY) != sign(e2.rawY - last2Y)) return@runCatching
-                yAnimation = flingAnimationOf({
-                    params.y = it.toInt()
-                    Instances.windowManager.updateViewLayout(binding.root, params)
-                    positionBubble()
-                }, {
-                    params.y.toFloat()
-                })
-                    .setStartVelocity(velocityY)
-                    .setMinValue(0F)
-                    .setMaxValue(context.display.height.toFloat() - binding.root.height)
-                yAnimation?.start()
-            }
-            return true
+            // No inertial fling: the window stays exactly where the drag left it instead of
+            // sliding on and sometimes running past the screen edges.
+            return false
         }
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
             when (tapSource) {
                 TapSource.NOTCH -> toggleSuperBubble()
-                TapSource.ROOT -> if (isMini && !isCollapsed) changeMini()
-                else if (!isMini && isCollapsed) changeCollapsed()
+                TapSource.ROOT -> when {
+                    isCollapsed -> changeCollapsed()
+                    isMini -> changeMini()
+                }
             }
             return true
         }

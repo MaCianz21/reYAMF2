@@ -144,20 +144,28 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
                 "com.android.server.input.InputManagerService",
                 lpparam.classLoader
             )
-            XposedBridge.hookAllMethods(
-                clazz,
-                "injectInputEvent",
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (param.args.size != 2) return
-                        val event = param.args[0] as? InputEvent ?: return
-                        runCatching {
-                            // Claim success: the press was delivered to the window instead.
-                            if (NavKeyRouter.onInjectedEvent(event)) param.result = true
-                        }.onFailure { log(TAG, "cannot route the navigation key", it) }
-                    }
-                }
-            )
-        }.onFailure { log(TAG, "cannot hook InputManagerService.injectInputEvent", it) }
+            // Both the binder entry point and the target-specific method it delegates to are
+            // hooked: the exact one called differs between releases, and either can be the first
+            // to see a key.
+            listOf("injectInputEvent", "injectInputEventToTarget").forEach { methodName ->
+                runCatching {
+                    XposedBridge.hookAllMethods(
+                        clazz,
+                        methodName,
+                        object : XC_MethodHook() {
+                            override fun beforeHookedMethod(param: MethodHookParam) {
+                                if (param.args.isEmpty()) return
+                                val event = param.args[0] as? InputEvent ?: return
+                                runCatching {
+                                    // Claim success: the press was delivered to the window instead.
+                                    if (NavKeyRouter.onInjectedEvent(event)) param.result = true
+                                }.onFailure { log(TAG, "cannot route the navigation key", it) }
+                            }
+                        }
+                    )
+                    log(TAG, "hooked InputManagerService.$methodName")
+                }.onFailure { log(TAG, "cannot hook InputManagerService.$methodName", it) }
+            }
+        }.onFailure { log(TAG, "cannot hook InputManagerService", it) }
     }
 }

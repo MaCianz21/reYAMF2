@@ -18,7 +18,7 @@ val isDirty: Boolean = providers.exec {
 
 android {
     val buildTime = System.currentTimeMillis()
-    val baseVersionName = "1.1.4"
+    val baseVersionName = "1.1.5"
     namespace = "com.mja.reyamf"
     compileSdk = 37
 
@@ -26,7 +26,7 @@ android {
         applicationId = "com.mja.reyamf"
         minSdk = 33
         targetSdk = 36
-        versionCode = 3
+        versionCode = 5
         versionName = "$baseVersionName-git.$gitHash${if (isDirty) "-dirty" else ""}"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
