@@ -1337,7 +1337,13 @@ class AppWindow(
         }.onFailure { Log.d(TAG, "cannot raise the existing window", it) }
     }
 
-    /** Sends a key press to the app running inside this window's virtual display. */
+    /**
+     * Sends a key press to the app running inside this window's virtual display.
+     *
+     * The display id on the event is what the input dispatcher uses to pick the focused window of
+     * that display (see InputDispatcher.getTargetDisplayId); keys are only non-targeted when they
+     * come from a physical keyboard and carry no display id at all.
+     */
     fun forwardKey(keyCode: Int) {
         if (displayId <= 0 || isMini || isCollapsed) return
         val now = SystemClock.uptimeMillis()
