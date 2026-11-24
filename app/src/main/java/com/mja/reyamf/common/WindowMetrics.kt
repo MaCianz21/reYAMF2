@@ -48,4 +48,35 @@ object WindowMetrics {
         val base = baseDensity(widthPx, heightPx, xdpi, ydpi)
         return (base - reduceDpi.coerceAtLeast(0)).coerceAtLeast(MIN_DENSITY)
     }
+
+    /**
+     * Lowest gravity offset that keeps a window's top edge at [topInsetPx] on screen.
+     *
+     * The floating window is laid out with FLAG_LAYOUT_NO_LIMITS, so nothing but this clamp stops
+     * its top edge from sliding over the status bar, where the notch that moves it cannot be
+     * grabbed any more. The offset is derived from the window's measured position instead of from
+     * the screen size: the window manager lays overlays out inside an area it has already inset by
+     * the bars, so an offset computed from the full screen height leaves the top edge exactly that
+     * far under the status bar. [topAtZeroOffset] is the top edge's measured screen position when
+     * the offset is zero, which makes this a plain delta that works whatever the gravity.
+     */
+    fun minGravityY(topAtZeroOffset: Int, topInsetPx: Int): Int =
+        topInsetPx.coerceAtLeast(0) - topAtZeroOffset
+
+    /**
+     * Clamps a gravity offset so the top edge stays below [topInsetPx] and the bottom edge stays on
+     * screen. A window taller than the screen keeps its top edge visible, because that is the part
+     * the user drags it by.
+     */
+    fun clampGravityY(
+        currentY: Int,
+        topAtZeroOffset: Int,
+        windowHeightPx: Int,
+        screenHeightPx: Int,
+        topInsetPx: Int
+    ): Int {
+        val minY = minGravityY(topAtZeroOffset, topInsetPx)
+        val maxY = (screenHeightPx - windowHeightPx - topAtZeroOffset).coerceAtLeast(minY)
+        return currentY.coerceIn(minY, maxY)
+    }
 }

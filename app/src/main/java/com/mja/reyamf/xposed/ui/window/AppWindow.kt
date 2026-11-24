@@ -41,6 +41,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.WindowInsets
 import android.view.WindowManagerHidden
 import android.widget.ImageButton
 import androidx.core.graphics.ColorUtils
@@ -97,6 +98,7 @@ class AppWindow(
     companion object {
         const val TAG = "reYAMF_AppWindow"
         const val ACTION_RESET_ALL_WINDOW = "com.mja.reyamf.ui.window.action.ACTION_RESET_ALL_WINDOW"
+        private const val NOT_LAID_OUT = Int.MIN_VALUE
     }
 
     lateinit var binding: WindowAppBinding
@@ -137,6 +139,10 @@ class AppWindow(
     private var isResize: Boolean = true
     private var orientation = 0
     private var params = WindowManager.LayoutParams()
+    /** Cached top inset; cleared on rotation, where the status bar height can change. */
+    private var topInsetPx = -1
+    /** Top edge's screen position at offset zero; [NOT_LAID_OUT] until the first layout. */
+    private var topAtZeroOffset = NOT_LAID_OUT
     private var paramsBg = WindowManager.LayoutParams()
     private var hideBackGesturesRunnable: Runnable? = null
     private var lastClickTime = 0L
@@ -180,7 +186,8 @@ class AppWindow(
                 val lp = binding.root.layoutParams as WindowManager.LayoutParams
                 lp.apply {
                     x = 0
-                    y = 0
+                    // Reset to the top of the window, which starts below the status bar.
+                    y = minWindowY()
                 }
                 Instances.windowManager.updateViewLayout(binding.root, lp)
                 positionBubble()
@@ -303,6 +310,7 @@ class AppWindow(
                 y = -80.dpToPx().toInt()
             } else {
                 gravity = Gravity.TOP or Gravity.START
+                // The bars are already cut out of the area the window is laid out in.
                 y = 0
             }
             x = 0
@@ -359,7 +367,11 @@ class AppWindow(
         }
         // Resizes, rotations and the collapse animations all land here, so the bubble follows
         // the window's new top edge without every code path having to remember it.
-        binding.root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> positionBubble() }
+        binding.root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            recordTopOffset()
+            positionBubble()
+            keepTopBelowStatusBar()
+        }
 
         binding.rootClickMask.setOnTouchListener { _, event ->
             tapSource = TapSource.ROOT
@@ -642,20 +654,67 @@ class AppWindow(
     private fun screenHeight(): Int = runCatching { context.display.height }
         .getOrDefault(context.resources.displayMetrics.heightPixels)
 
-    private fun isCentredVertically(params: WindowManager.LayoutParams): Boolean =
-        (params.gravity and Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL
-
     private fun isCentredHorizontally(params: WindowManager.LayoutParams): Boolean =
         (params.gravity and Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL
 
-    /** Lowest params.y that keeps the window's top edge, and its three-dot handle, on screen. */
+    /**
+     * Lowest params.y that keeps the window's top edge, and its three-dot handle, below the status
+     * bar. Measured from the window's laid-out position rather than the screen size: the offset is
+     * relative to an area the window manager has already inset by the bars.
+     */
     private fun minWindowY(): Int {
         val params = binding.root.layoutParams as WindowManager.LayoutParams
-        return if (isCentredVertically(params)) {
-            (binding.root.height - screenHeight()) / 2
-        } else {
-            0
-        }
+        if (topAtZeroOffset == NOT_LAID_OUT) return params.y
+        return WindowMetrics.minGravityY(topAtZeroOffset, topInset())
+    }
+
+    /**
+     * Records where the window's top edge lands for an offset of zero. Offsets move the window
+     * one-to-one, so this holds for every drag frame and only changes with the layout.
+     */
+    private fun recordTopOffset() {
+        val params = binding.root.layoutParams as? WindowManager.LayoutParams ?: return
+        val location = IntArray(2)
+        binding.root.getLocationOnScreen(location)
+        topAtZeroOffset = location[1] - params.y
+    }
+
+    /**
+     * A resize moves a centred window's top edge by half the size change, so the clamp is enforced
+     * once the new size is laid out instead of being predicted before it is known.
+     */
+    private fun keepTopBelowStatusBar() {
+        if (isDestroyed) return
+        val params = binding.root.layoutParams as? WindowManager.LayoutParams ?: return
+        val minY = minWindowY()
+        if (params.y >= minY) return
+        params.y = minY
+        updateWindowLayout(params)
+    }
+
+    /**
+     * Top of the usable screen area: the status bar, or the display cutout when it is taller.
+     *
+     * The chrome window is laid out with FLAG_LAYOUT_NO_LIMITS, so the system never fits it below
+     * the bars. The drag clamps have to keep the notch below this line themselves, otherwise the
+     * window can be dragged under the status bar and then cannot be grabbed again.
+     */
+    private fun topInset(): Int {
+        val fromInsets = runCatching {
+            binding.root.rootWindowInsets?.getInsetsIgnoringVisibility(
+                WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()
+            )?.top ?: 0
+        }.getOrDefault(0)
+        if (fromInsets > 0) return fromInsets
+        // Overlay windows do not always receive insets, so the status bar height is the fallback.
+        // Only the fallback is cached: a resource lookup on every drag frame is not free, and the
+        // real insets are re-read as soon as the window receives them.
+        if (topInsetPx >= 0) return topInsetPx
+        topInsetPx = runCatching {
+            val id = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+            if (id > 0) context.resources.getDimensionPixelSize(id) else 0
+        }.getOrDefault(0)
+        return topInsetPx
     }
 
     /** Horizontal centre of the three dots on screen, accounting for the window's gravity. */
@@ -689,12 +748,7 @@ class AppWindow(
         val h = binding.root.height
         if (w <= 0 || h <= 0) return
         val newX = clampWindowX(params, w)
-        val newY = if (isCentredVertically(params)) {
-            val maxY = ((screenHeight() - h) / 2).coerceAtLeast(0)
-            params.y.coerceIn(-maxY, maxY)
-        } else {
-            params.y.coerceIn(0, (screenHeight() - h).coerceAtLeast(0))
-        }
+        val newY = WindowMetrics.clampGravityY(params.y, topAtZeroOffset, h, screenHeight(), topInset())
         if (newX == params.x && newY == params.y) return
         params.x = newX
         params.y = newY
@@ -797,6 +851,7 @@ class AppWindow(
     }
 
     fun rotate(rotation: Int) {
+        topInsetPx = -1
         if (rotation == 1 || rotation == 3) {
             val t = halfHeight
             halfHeight = halfWidth
