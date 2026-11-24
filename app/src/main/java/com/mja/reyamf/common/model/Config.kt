@@ -22,6 +22,11 @@ data class Config(
     */
     var surfaceView: Int = 1,
     var recentBackHome: Boolean = false,
+    /*
+     * False keeps the tablet's own, full-size keyboard while the text goes to the window; true
+     * draws the keyboard inside the window. Releases that cannot keep the tablet's keyboard up for
+     * a window's app always use the in-window keyboard, see ImePolicy.
+     */
     var showImeInWindow: Boolean = false,
     var defaultWindowWidth: Int = 280,
     var defaultWindowHeight: Int = 380,

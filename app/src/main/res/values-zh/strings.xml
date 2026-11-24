@@ -27,7 +27,8 @@
     <string name="reset_all_window">重置所有窗口</string>
     <string name="window_size_separator">x</string>
     <string name="default_window_size_text">默认窗口大小</string>
-    <string name="ime_switch_text">在窗口中显示输入法\n必须启用 VIRTUAL_DISPLAY_FLAG_PUBLIC</string>
+    <string name="ime_switch_text">键盘显示在窗口内</string>
+    <string name="ime_switch_unsupported">此 Android 版本无法在窗口中持续使用平板的键盘，因此键盘会显示在窗口内。</string>
     <string name="keep_alive_service_text">保持 reYAMF2 在后台运行</string>
     <string name="collapsed_app_icon">折叠视图的应用图标</string>
     <string name="wow_nsuch_empty">哇！\n空荡荡~</string>

@@ -56,6 +56,7 @@ import com.mja.reyamf.common.reflect.getObject
 import com.mja.reyamf.common.reflect.getObjectAs
 import com.mja.reyamf.common.reflect.invokeMethod
 import com.google.android.material.color.MaterialColors
+import com.mja.reyamf.common.ImePolicy
 import com.mja.reyamf.common.WindowMetrics
 import com.mja.reyamf.common.getAttr
 import com.mja.reyamf.common.model.StartCmd
@@ -1156,17 +1157,19 @@ class AppWindow(
     }
 
     /**
-     * Applies the window's IME policy to its virtual display, which decides whether the keyboard
-     * is drawn inside the window or on the tablet's own display.
+     * Applies the window's IME policy to its virtual display: the tablet's full-size keyboard
+     * (“Show IME in window” off) or a keyboard drawn inside the window (“on”).
      *
-     * The policy is stored per display and was previously written only when the window was
-     * created, so flipping "Show IME in window" had no effect on the windows already open and the
-     * keyboard of some windows stayed on the other display. The current policy is compared first,
-     * because setting it reconfigures the display.
+     * The fallback policy cannot keep the tablet keyboard up for a window's app on releases that
+     * route the IME request through the app display's own insets source, so those windows use the
+     * in-window keyboard instead of being left with none; see [ImePolicy]. The policy is stored per
+     * display, so it is re-applied to every open window when the config is pushed and compared
+     * first, because setting it reconfigures the display.
      */
     fun applyImePolicy(force: Boolean = false) {
         if (isDestroyed || displayId <= 0) return
-        val policy = if (config.showImeInWindow) {
+        val useLocalIme = config.showImeInWindow || !ImePolicy.fallbackSupported
+        val policy = if (useLocalIme) {
             WindowManagerHidden.DISPLAY_IME_POLICY_LOCAL
         } else {
             WindowManagerHidden.DISPLAY_IME_POLICY_FALLBACK_DISPLAY

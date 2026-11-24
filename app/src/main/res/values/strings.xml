@@ -28,7 +28,8 @@
     <string name="reset_all_window">reset all window</string>
     <string name="window_size_separator">x</string>
     <string name="default_window_size_text">Default Window Size</string>
-    <string name="ime_switch_text">Show IME in window\nVIRTUAL_DISPLAY_FLAG_PUBLIC must be true</string>
+    <string name="ime_switch_text">Keyboard in window</string>
+    <string name="ime_switch_unsupported">This Android version cannot keep the tablet keyboard up for a window, so the keyboard is drawn inside the window.</string>
     <string name="keep_alive_service_text">Keeps reYAMF2 alive in the background</string>
     <string name="collapsed_app_icon">app icon for collapsed view</string>
     <string name="wow_nsuch_empty">Wow! \nSuch empty</string>
