@@ -31,9 +31,6 @@ import kotlin.concurrent.thread
 class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
     companion object {
         private const val TAG = "reYAMF_HookSystem"
-
-        /** The hide entry point the app itself calls; every other one is the server's reaction. */
-        private const val CLIENT_HIDE = "hideSoftInput"
     }
 
     override fun initZygote(startupParam: IXposedHookZygoteInit.StartupParam) {
@@ -188,14 +185,16 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
             // Every show and hide entry point is hooked: the server shows the keyboard on its own
             // when the app's input target gains focus, only some paths carry a window token, and
             // the token is not always the first parameter.
-            (SHOW_METHODS + HIDE_METHODS).forEach { methodName ->
+            val showMethods = ImeVisibilityBridge.SHOW_METHODS
+            val hideMethods = ImeVisibilityBridge.HIDE_METHODS
+            (showMethods + hideMethods).forEach { methodName ->
                 runCatching {
-                    if (methodName in HIDE_METHODS) {
+                    if (methodName in hideMethods) {
                         immService.declaredMethods
                             .filter { it.name == methodName }
                             .forEach { ImeVisibilityBridge.rememberHideMethod(it) }
                     }
-                    if (methodName in SHOW_METHODS) {
+                    if (methodName in showMethods) {
                         immService.declaredMethods
                             .filter { it.name == methodName }
                             .forEach { ImeVisibilityBridge.rememberShowMethod(it) }
@@ -208,7 +207,7 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
                                 runCatching {
                                     ImeVisibilityBridge.attachService(param.thisObject)
                                     when {
-                                        methodName in SHOW_METHODS -> {
+                                        methodName in showMethods -> {
                                             val token =
                                                 param.args.firstOrNull { it is IBinder } as? IBinder
                                             if (ImeVisibilityBridge.dropsShowRequest(token)) {
@@ -226,14 +225,15 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
                                         }
 
                                         // The app itself is done typing.
-                                        methodName == CLIENT_HIDE ->
+                                        methodName == ImeVisibilityBridge.CLIENT_HIDE ->
                                             ImeVisibilityBridge.onHideRequested()
 
                                         // The server hides the keyboard because it believes
                                         // the app withdrew the request, which is the
                                         // misunderstanding these hooks exist for.
                                         ImeVisibilityBridge.keepsTabletKeyboard ->
-                                            param.result = Unit
+                                            param.result =
+                                                ImeVisibilityBridge.skippedHideResult(param.method)
                                     }
                                 }.onFailure { Log.e(TAG, "cannot track $methodName", it) }
                             }
@@ -310,15 +310,4 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
             Log.i(TAG, "hooked ImeInsetsSourceProvider.invokeOnImeRequestedChangedListener")
         }.onFailure { Log.e(TAG, "cannot hook ImeInsetsSourceProvider", it) }
     }
-
-    /** Entry points that ask for the keyboard, and that take it back. */
-    private val SHOW_METHODS = setOf(
-        "showSoftInput",
-        "showCurrentInputInternal",
-        "showCurrentInputLocked",
-    )
-    private val HIDE_METHODS = setOf(
-        "hideSoftInput",
-        "hideCurrentInputInternal",
-    )
 }

@@ -26,7 +26,7 @@ android {
         applicationId = "com.mja.reyamf"
         minSdk = 33
         targetSdk = 36
-        versionCode = 40
+        versionCode = 42
         versionName = baseVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

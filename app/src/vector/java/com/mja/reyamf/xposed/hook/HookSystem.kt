@@ -189,14 +189,16 @@ object HookSystem {
             // Every show and hide entry point is hooked, every overload: the server shows the
             // keyboard on its own when the app's input target gains focus, only some paths carry a
             // window token, and the token is not always the first parameter.
-            (SHOW_METHODS + HIDE_METHODS).forEach { methodName ->
+            val showMethods = ImeVisibilityBridge.SHOW_METHODS
+            val hideMethods = ImeVisibilityBridge.HIDE_METHODS
+            (showMethods + hideMethods).forEach { methodName ->
                 immService.declaredMethods.filter { it.name == methodName }.forEach { method ->
                     runCatching {
                         deoptimize(module, method)
-                        if (methodName in HIDE_METHODS) {
+                        if (methodName in hideMethods) {
                             ImeVisibilityBridge.rememberHideMethod(method)
                         }
-                        if (methodName in SHOW_METHODS) {
+                        if (methodName in showMethods) {
                             ImeVisibilityBridge.rememberShowMethod(method)
                         }
                         method.createHook {
@@ -204,7 +206,7 @@ object HookSystem {
                                 runCatching {
                                     ImeVisibilityBridge.attachService(param.thisObject)
                                     when {
-                                        methodName in SHOW_METHODS -> {
+                                        methodName in showMethods -> {
                                             val token =
                                                 param.args.firstOrNull { it is IBinder } as? IBinder
                                             if (ImeVisibilityBridge.dropsShowRequest(token)) {
@@ -222,14 +224,15 @@ object HookSystem {
                                         }
 
                                         // The app itself is done typing.
-                                        methodName == CLIENT_HIDE ->
+                                        methodName == ImeVisibilityBridge.CLIENT_HIDE ->
                                             ImeVisibilityBridge.onHideRequested()
 
                                         // The server hides the keyboard because it believes
                                         // the app withdrew the request, which is the
                                         // misunderstanding these hooks exist for.
                                         ImeVisibilityBridge.keepsTabletKeyboard ->
-                                            param.result = Unit
+                                            param.result =
+                                                ImeVisibilityBridge.skippedHideResult(method)
                                     }
                                 }.onFailure { Log.e(TAG, "cannot track $methodName", it) }
                             }
@@ -255,21 +258,21 @@ object HookSystem {
                             val requested = param.args.firstOrNull() as? Boolean
                                 ?: return@runCatching
                             // A repeat of a request that already holds needs no work.
-                                                            if (ImeVisibilityBridge.repeatsActiveRequest(
-                                        requested,
-                                        param.thisObject
-                                    )
-                                ) {
+                            if (ImeVisibilityBridge.repeatsActiveRequest(
+                                    requested,
+                                    param.thisObject
+                                )
+                            ) {
                                 param.result = Unit
                                 return@runCatching
                             }
                             // A first request starts the keep, and every later withdrawal for the
                             // same display is overridden.
-                                                            param.args[0] = ImeVisibilityBridge.imeRequestedValue(
-                                    requested,
-                                    param.args.getOrNull(1),
-                                    param.thisObject
-                                )
+                            param.args[0] = ImeVisibilityBridge.imeRequestedValue(
+                                requested,
+                                param.args.getOrNull(1),
+                                param.thisObject
+                            )
                         }.onFailure { Log.e(TAG, "cannot keep the IME requested", it) }
                     }
                 }
@@ -285,8 +288,8 @@ object HookSystem {
             deoptimize(module, method)
             method.createHook {
                 before { param ->
-                                            runCatching {
-                            // The listener would take the withdrawn request to the input method
+                    runCatching {
+                        // The listener would take the withdrawn request to the input method
                         // service, but it carries the app's show as well: only a withdrawal is
                         // dropped while a window keeps the keyboard.
                         if (ImeVisibilityBridge.keepsTabletKeyboard &&
@@ -300,20 +303,6 @@ object HookSystem {
             Log.i(TAG, "hooked ImeInsetsSourceProvider.invokeOnImeRequestedChangedListener")
         }.onFailure { Log.e(TAG, "cannot hook ImeInsetsSourceProvider", it) }
     }
-
-    /** Entry points that ask for the keyboard, and that take it back. */
-    private val SHOW_METHODS = setOf(
-        "showSoftInput",
-        "showCurrentInputInternal",
-        "showCurrentInputLocked",
-    )
-    private val HIDE_METHODS = setOf(
-        "hideSoftInput",
-        "hideCurrentInputInternal",
-    )
-
-    /** The hide entry point the app itself calls; every other one is the server's reaction. */
-    private const val CLIENT_HIDE = "hideSoftInput"
 
     private fun deoptimize(module: XposedModule, executable: Executable) {
         runCatching { module.deoptimize(executable) }

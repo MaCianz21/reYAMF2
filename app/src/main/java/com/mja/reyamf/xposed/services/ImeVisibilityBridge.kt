@@ -33,6 +33,22 @@ object ImeVisibilityBridge {
     /** The keyboard's bit in the insets types, which the window manager numbers the same way. */
     private const val IME_TYPE = 8
 
+    /** Entry points that ask for the keyboard, shared by both hook flavours. */
+    val SHOW_METHODS: Set<String> = setOf(
+        "showSoftInput",
+        "showCurrentInputInternal",
+        "showCurrentInputLocked",
+    )
+
+    /** Entry points that take the keyboard back. */
+    val HIDE_METHODS: Set<String> = setOf(
+        "hideSoftInput",
+        "hideCurrentInputInternal",
+    )
+
+    /** The hide entry point the app itself calls; every other one is the server's reaction. */
+    const val CLIENT_HIDE = "hideSoftInput"
+
     /**
      * True while the user closed the keyboard and nothing has asked for it again.
      *
@@ -202,6 +218,20 @@ object ImeVisibilityBridge {
             target?.invokeMethodAs<Boolean>("isRequestedVisible", WindowInsets.Type.ime()) == false
         }.getOrDefault(true)
 
+    /**
+     * Result that makes a hide the framework started on its own report that it did nothing.
+     *
+     * The entry points do not agree on a return type and the framework casts the result back:
+     * handing a `boolean`-returning hide a `Unit` crashes system_server with a
+     * ClassCastException. "Nothing was hidden" is both the truth here and the type it expects.
+     */
+    fun skippedHideResult(member: java.lang.reflect.Member?): Any =
+        if ((member as? java.lang.reflect.Method)?.returnType == Boolean::class.javaPrimitiveType) {
+            false
+        } else {
+            Unit
+        }
+
     /** The app asked to hide the keyboard (or lost its editor), so stop keeping it up. */
     fun onHideRequested() {
         if (keptDisplayId > 0) {
@@ -214,9 +244,17 @@ object ImeVisibilityBridge {
         clearFallbackRequest()
     }
 
-    /** The window left, so nothing may keep the keyboard up for its display any more. */
+    /**
+     * The window stopped keeping the keyboard: it closed, minimised or was collapsed.
+     *
+     * The keep is dropped *and* the keyboard hidden, because the framework's own hide for that
+     * window arrives while the keep is still in force and is dropped as a misunderstanding: left
+     * to itself the keyboard would stay drawn over whatever takes focus next.
+     */
     fun onDisplayLost(displayId: Int) {
-        if (keptDisplayId == displayId) onHideRequested()
+        if (keptDisplayId != displayId) return
+        Log.i(TAG, "the window of display $displayId is gone, hiding its keyboard")
+        releaseKeyboard()
     }
 
     /** Remembers the service the hooks are installed on, which a restart replaces. */
@@ -275,34 +313,45 @@ object ImeVisibilityBridge {
     /** Asks the input method service to draw the keyboard for its current client. */
     private fun showTabletKeyboard() {
         val service = immService
-        if (service == null || !show(showMethods, service)) {
-            Log.w(TAG, "cannot ask for the tablet keyboard")
-        }
+        // A show entry point that returns false declines the request, so the next one is tried; one
+        // that returns nothing has taken it.
+        val shown = service != null &&
+                invokeFirst(showMethods, service, null) { it as? Boolean ?: true }
+        if (!shown) Log.w(TAG, "cannot ask for the tablet keyboard")
     }
 
-    /** Calls the first show entry point that reports success. */
-    private fun show(
+    /**
+     * Calls the first entry point that takes the request, with [token] in the parameter that
+     * accepts one and default values in the rest.
+     *
+     * The service declares these over several overloads and none of them takes anything else a
+     * caller here can supply. [accepted] decides whether a returned value means the call took
+     * effect: a show reports false when it declines, while a hide returns nothing at all.
+     */
+    private fun invokeFirst(
         methods: List<java.lang.reflect.Method>,
         service: Any,
+        token: IBinder?,
+        accepted: (Any?) -> Boolean,
     ): Boolean {
         for (method in methods) {
-            val args = Array(method.parameterCount) { index ->
+            val args = Array<Any?>(method.parameterCount) { index ->
                 val type = method.parameterTypes[index]
                 when {
-                    IBinder::class.java.isAssignableFrom(type) -> null
+                    IBinder::class.java.isAssignableFrom(type) -> token
                     type == Int::class.javaPrimitiveType -> 0
                     type == Boolean::class.javaPrimitiveType -> false
                     else -> null
                 }
             }
-            val shown = runCatching {
+            val took = runCatching {
                 method.isAccessible = true
-                method.invoke(service, *args) as? Boolean ?: true
+                accepted(method.invoke(service, *args))
             }.getOrElse {
-                Log.w(TAG, "cannot show the tablet keyboard through $method", it)
+                Log.w(TAG, "cannot call $method", it)
                 false
             }
-            if (shown) return true
+            if (took) return true
         }
         return false
     }
@@ -314,17 +363,29 @@ object ImeVisibilityBridge {
      */
     fun hideTabletKeyboard(): Boolean {
         if (!keepsTabletKeyboard) return false
+        releaseKeyboard()
+        return true
+    }
+
+    /**
+     * Drops the keep and hides the keyboard it held up.
+     *
+     * The window's own token is tried first and the current client second: by the time a closing
+     * window reports back its token may already be gone, and a hide that names nothing still
+     * closes the keyboard that was drawn.
+     */
+    private fun releaseKeyboard() {
         userClosed = true
         val service = immService
         val token = keptToken
         keptDisplayId = -1
         keptToken = null
         lastRequestTarget = null
-        if (service == null || !hide(hideMethods, service, token)) {
-            Log.w(TAG, "let the tablet keyboard go without hiding it")
-        }
+        val hidden = service != null &&
+                (invokeFirst(hideMethods, service, token) { _ -> true } ||
+                        invokeFirst(hideMethods, service, null) { _ -> true })
+        if (!hidden) Log.w(TAG, "let the tablet keyboard go without hiding it")
         clearFallbackRequest()
-        return true
     }
 
     /**
@@ -376,40 +437,6 @@ object ImeVisibilityBridge {
     private fun activeDisplay(): Int? =
         YAMFManager.currentDisplayId.takeIf { YAMFManager.hostsWindow(it) }
             ?: YAMFManager.activeWindow()?.displayId
-
-    /**
-     * Calls the first hide entry point that takes the window token.
-     *
-     * The service declares these over several overloads and none of them takes anything a caller
-     * here can supply, so the remaining parameters get their defaults.
-     */
-    private fun hide(
-        methods: List<java.lang.reflect.Method>,
-        service: Any,
-        token: IBinder?,
-    ): Boolean {
-        for (method in methods) {
-            val args = Array(method.parameterCount) { index ->
-                val type = method.parameterTypes[index]
-                when {
-                    IBinder::class.java.isAssignableFrom(type) -> token
-                    type == Int::class.javaPrimitiveType -> 0
-                    type == Boolean::class.javaPrimitiveType -> false
-                    else -> null
-                }
-            }
-            val hidden = runCatching {
-                method.isAccessible = true
-                method.invoke(service, *args)
-                true
-            }.getOrElse {
-                Log.w(TAG, "cannot hide the tablet keyboard through $method", it)
-                false
-            }
-            if (hidden) return true
-        }
-        return false
-    }
 
     /**
      * Display that owns the window [token] belongs to.
