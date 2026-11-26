@@ -14,7 +14,6 @@ import androidx.preference.PreferenceManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.slider.Slider
 import com.mja.reyamf.R
-import com.mja.reyamf.common.ImePolicy
 import com.mja.reyamf.common.gson
 import com.mja.reyamf.databinding.ActivitySettingBinding
 import com.mja.reyamf.manager.services.YAMFManagerProxy
@@ -75,14 +74,7 @@ class SettingActivity : AppCompatActivity() {
             btnFlags.text = config.flags.toString()
             sColoerd.isChecked = config.coloredController
             sBackHome.isChecked = config.recentBackHome
-            // Releases that cannot keep the tablet's keyboard up for a window's app always use
-            // the in-window keyboard, so the switch shows that instead of a choice it cannot keep.
-            sShowIMEinWindow.isChecked = config.showImeInWindow || !ImePolicy.fallbackSupported
-            sShowIMEinWindow.isEnabled = ImePolicy.fallbackSupported
-            if (!ImePolicy.fallbackSupported) {
-                sShowIMEinWindow.text = getString(R.string.ime_switch_text) +
-                        "\n" + getString(R.string.ime_switch_unsupported)
-            }
+            sShowIMEinWindow.isChecked = config.showImeInWindow
             etSizeH.setText(config.defaultWindowHeight.toString())
             etSizeW.setText(config.defaultWindowWidth.toString())
             sHookLauncherHookRecents.isChecked = config.hookLauncher.hookRecents

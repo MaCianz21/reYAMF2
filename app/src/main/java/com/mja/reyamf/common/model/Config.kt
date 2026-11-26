@@ -24,8 +24,9 @@ data class Config(
     var recentBackHome: Boolean = false,
     /*
      * False keeps the tablet's own, full-size keyboard while the text goes to the window; true
-     * draws the keyboard inside the window. Releases that cannot keep the tablet's keyboard up for
-     * a window's app always use the in-window keyboard, see ImePolicy.
+     * draws the keyboard inside the window. The tablet keyboard is kept up by
+     * [com.mja.reyamf.xposed.services.ImeVisibilityBridge], which the framework's own insets
+     * pipeline would otherwise cancel as soon as the keyboard is drawn.
      */
     var showImeInWindow: Boolean = false,
     var defaultWindowWidth: Int = 280,

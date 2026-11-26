@@ -98,10 +98,23 @@ so sign them with your own key before installing. Useful tasks:
 - Some apps restart while being resized.
 - After collapsing a window to its app icon, tapping the icon does not always restore it; the
   minimize state does restore.
-- Keyboard might not show up when trying to type inside the floating window
 - Navigation buttons acts on the background application even when the foreground window is focused
 
 ## Changelog
+
+### 1.1.6
+
+- The tablet's own, full-size keyboard now stays up for an app running in a floating window on
+  Android 16 and later, where the framework cancelled the request as soon as the keyboard had
+  been drawn and left the window with none. Back closes the keyboard before it reaches the app,
+  and a tap on the window brings it back.
+- Typing in a window costs no more than before: a show request that repeats one already in force
+  is answered without work, and the display lookups behind it are cached. On a Galaxy Tab S6
+  Lite, an open window with the keyboard up cost 168 ms of `system_server` CPU per tap with the
+  fix, against 183 ms for the same keyboard drawn with the fix idled, inside the 12-19 ms
+  run-to-run spread.
+- "Keyboard in window" is a real choice on every supported release again; the forced in-window
+  keyboard and its notice are gone.
 
 ### 1.1.4
 

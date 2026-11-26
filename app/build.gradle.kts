@@ -19,7 +19,6 @@ val isDirty: Boolean = providers.exec {
 android {
     val buildTime = System.currentTimeMillis()
     val baseVersionName = "1.1.6"
-    val betaVersion = 4
     namespace = "com.mja.reyamf"
     compileSdk = 37
 
@@ -27,8 +26,8 @@ android {
         applicationId = "com.mja.reyamf"
         minSdk = 33
         targetSdk = 36
-        versionCode = 9
-        versionName = "${baseVersionName}-beta$betaVersion"
+        versionCode = 40
+        versionName = baseVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

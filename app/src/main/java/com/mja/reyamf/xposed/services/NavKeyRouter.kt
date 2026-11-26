@@ -56,7 +56,12 @@ object NavKeyRouter {
         // display behind the window (and must not skip the matching release).
         runCatching {
             when (key.keyCode) {
-                KeyEvent.KEYCODE_BACK -> window.forwardKey(KeyEvent.KEYCODE_BACK)
+                // A kept tablet keyboard is on the default display, out of the back key's
+                // reach: the first press closes it, the next one leaves the app.
+                KeyEvent.KEYCODE_BACK ->
+                    if (!ImeVisibilityBridge.hideTabletKeyboard()) {
+                        window.forwardKey(KeyEvent.KEYCODE_BACK)
+                    }
                 KeyEvent.KEYCODE_HOME -> {
                     window.navHome()
                     YAMFManager.clearActiveWindow()

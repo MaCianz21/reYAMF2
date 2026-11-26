@@ -184,8 +184,12 @@ object YAMFManager : IYAMFManager.Stub() {
     fun removeWindow(id: Int) {
         windowsByDisplay.remove(id)
         if (activeDisplayId == id) activeDisplayId = -1
+        ImeVisibilityBridge.onDisplayLost(id)
         if (windows.remove(id)) notifyOpenCount()
     }
+
+    /** True when [displayId] hosts one of the floating windows. */
+    fun hostsWindow(displayId: Int): Boolean = windowsByDisplay.containsKey(displayId)
 
     /** Remembers which window the navigation bar buttons must act on. */
     fun onWindowFocused(displayId: Int) {

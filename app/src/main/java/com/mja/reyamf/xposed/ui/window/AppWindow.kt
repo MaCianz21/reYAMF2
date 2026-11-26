@@ -56,7 +56,6 @@ import com.mja.reyamf.common.reflect.getObject
 import com.mja.reyamf.common.reflect.getObjectAs
 import com.mja.reyamf.common.reflect.invokeMethod
 import com.google.android.material.color.MaterialColors
-import com.mja.reyamf.common.ImePolicy
 import com.mja.reyamf.common.WindowMetrics
 import com.mja.reyamf.common.getAttr
 import com.mja.reyamf.common.model.StartCmd
@@ -67,6 +66,7 @@ import com.mja.reyamf.databinding.RightBackGestureOverlayBinding
 import com.mja.reyamf.databinding.WindowActionsBubbleBinding
 import com.mja.reyamf.databinding.WindowAppBinding
 import kotlinx.coroutines.withContext
+import com.mja.reyamf.xposed.services.ImeVisibilityBridge
 import com.mja.reyamf.xposed.services.YAMFManager
 import com.mja.reyamf.xposed.services.YAMFManager.config
 import com.mja.reyamf.xposed.utils.Instances
@@ -1158,18 +1158,16 @@ class AppWindow(
 
     /**
      * Applies the window's IME policy to its virtual display: the tablet's full-size keyboard
-     * (“Show IME in window” off) or a keyboard drawn inside the window (“on”).
+     * (“Keyboard in window” off) or a keyboard drawn inside the window (“on”).
      *
-     * The fallback policy cannot keep the tablet keyboard up for a window's app on releases that
-     * route the IME request through the app display's own insets source, so those windows use the
-     * in-window keyboard instead of being left with none; see [ImePolicy]. The policy is stored per
-     * display, so it is re-applied to every open window when the config is pushed and compared
-     * first, because setting it reconfigures the display.
+     * The tablet keyboard needs [ImeVisibilityBridge] to stay up, because the framework otherwise
+     * cancels the request as soon as it is drawn. The policy is stored per display, so it is
+     * re-applied to every open window when the config is pushed and compared first, because
+     * setting it reconfigures the display.
      */
     fun applyImePolicy(force: Boolean = false) {
         if (isDestroyed || displayId <= 0) return
-        val useLocalIme = config.showImeInWindow || !ImePolicy.fallbackSupported
-        val policy = if (useLocalIme) {
+        val policy = if (config.showImeInWindow) {
             WindowManagerHidden.DISPLAY_IME_POLICY_LOCAL
         } else {
             WindowManagerHidden.DISPLAY_IME_POLICY_FALLBACK_DISPLAY
@@ -1364,6 +1362,7 @@ class AppWindow(
         // nothing at all. Hand it to the thread that built the window instead.
         runMain {
             if (isDestroyed) return@runMain
+            ImeVisibilityBridge.onDisplayLost(displayId)
             hideSuperBubble()
             if (!isMini && !isCollapsed) changeCollapsed()
         }
@@ -1401,9 +1400,42 @@ class AppWindow(
             showBackGesturesBriefly()
             forwardMotionEvent(event)
             moveToTopIfNeed(event)
+            trackTapForKeyboard(event)
             return true
         }
     }
+
+    /**
+     * Hands a plain tap to the keyboard bridge.
+     *
+     * The app cannot ask for the tablet keyboard again by itself on one of our displays, so a tap
+     * is what brings it back after the user closed it. Drags and long presses belong to the window
+     * and the app, not to the keyboard.
+     */
+    private fun trackTapForKeyboard(event: MotionEvent) {
+        // This runs for every touch that reaches the window, so it must cost nothing while the
+        // keyboard is up: that single flag read is the whole cost then.
+        if (!ImeVisibilityBridge.waitsForTap) return
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                tapDownX = event.x
+                tapDownY = event.y
+            }
+
+            MotionEvent.ACTION_UP -> {
+                val slop = 16.dpToPx()
+                val moved = (event.x - tapDownX) * (event.x - tapDownX) +
+                        (event.y - tapDownY) * (event.y - tapDownY)
+                if (moved <= slop * slop) {
+                    runCatching { ImeVisibilityBridge.onWindowTapped(displayId) }
+                        .onFailure { Log.d(TAG, "cannot bring the keyboard back", it) }
+                }
+            }
+        }
+    }
+
+    private var tapDownX = 0f
+    private var tapDownY = 0f
 
     inner class SurfaceOnGenericMotionListener : View.OnGenericMotionListener {
         override fun onGenericMotion(v: View, event: MotionEvent): Boolean {
