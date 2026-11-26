@@ -194,11 +194,6 @@ class HookSystem : IXposedHookZygoteInit, IXposedHookLoadPackage {
                             .filter { it.name == methodName }
                             .forEach { ImeVisibilityBridge.rememberHideMethod(it) }
                     }
-                    if (methodName in showMethods) {
-                        immService.declaredMethods
-                            .filter { it.name == methodName }
-                            .forEach { ImeVisibilityBridge.rememberShowMethod(it) }
-                    }
                     XposedBridge.hookAllMethods(
                         immService,
                         methodName,

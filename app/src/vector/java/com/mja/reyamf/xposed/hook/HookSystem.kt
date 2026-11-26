@@ -198,9 +198,6 @@ object HookSystem {
                         if (methodName in hideMethods) {
                             ImeVisibilityBridge.rememberHideMethod(method)
                         }
-                        if (methodName in showMethods) {
-                            ImeVisibilityBridge.rememberShowMethod(method)
-                        }
                         method.createHook {
                             before { param ->
                                 runCatching {

@@ -8,8 +8,6 @@ import android.view.WindowInsets
 import com.mja.reyamf.common.reflect.findFieldOrNull
 import com.mja.reyamf.common.reflect.findMethodOrNull
 import com.mja.reyamf.common.reflect.invokeMethod
-import com.mja.reyamf.common.reflect.getObject
-import com.mja.reyamf.common.reflect.getObjectAs
 import com.mja.reyamf.common.reflect.invokeMethodAs
 import com.mja.reyamf.xposed.utils.Instances
 
@@ -60,14 +58,6 @@ object ImeVisibilityBridge {
     @Volatile
     private var userClosed = false
 
-    /**
-     * True while a tap may bring the keyboard back, so the window only has to look at a touch
-     * then. Reading this is a single volatile field read, which is what every touch costs while the
-     * keyboard is up.
-     */
-    val waitsForTap: Boolean
-        get() = userClosed
-
     /** Display whose app asked for the tablet keyboard, or -1 when none did. */
     @Volatile
     private var keptDisplayId = -1
@@ -97,8 +87,6 @@ object ImeVisibilityBridge {
     private var immService: Any? = null
     @Volatile
     private var hideMethods: List<java.lang.reflect.Method> = emptyList()
-    @Volatile
-    private var showMethods: List<java.lang.reflect.Method> = emptyList()
 
     /**
      * True while the tablet keyboard must stay requested for a window's display. Only the fallback
@@ -265,59 +253,6 @@ object ImeVisibilityBridge {
     /** Remembers one of the service's hide entry points, used to close the keyboard with back. */
     fun rememberHideMethod(method: java.lang.reflect.Method) {
         if (method !in hideMethods) hideMethods = hideMethods + method
-    }
-
-    /** Remembers one of the service's show entry points, used to ask for the keyboard on a tap. */
-    fun rememberShowMethod(method: java.lang.reflect.Method) {
-        // showSoftInput needs the app's own result receiver and cannot be driven from here.
-        if (method.name == "showSoftInput") return
-        if (method !in showMethods) showMethods = showMethods + method
-    }
-
-    /**
-     * The user tapped a floating window.
-     *
-     * An app on one of our displays cannot ask for the keyboard twice: it has no IME insets source
-     * of its own, so the framework hands it no control with a leash, and every later show request
-     * is dropped inside the app before it reaches this process. A tap that lands while the app
-     * still asks for the keyboard is therefore the only signal a second request produces, and it is
-     * enough to ask the input method service for the keyboard directly.
-     */
-    fun onWindowTapped(displayId: Int) {
-        if (YAMFManager.config.showImeInWindow) return
-        if (!userClosed || displayId <= 0 || !YAMFManager.hostsWindow(displayId)) return
-        if (!windowAsksForKeyboard(displayId)) return
-        Log.i(TAG, "the user tapped display $displayId, asking for the keyboard again")
-        userClosed = false
-        keptDisplayId = displayId
-        keptToken = null
-        // The tap asks for a keyboard that was closed, and closing it also took the request off
-        // the tablet display: without it back the source stays invisible and the input method
-        // service reports a shown keyboard that the window manager never draws.
-        setFallbackRequest(true)
-        showTabletKeyboard()
-    }
-
-    /** True while the window in focus on [displayId] still wants the keyboard. */
-    private fun windowAsksForKeyboard(displayId: Int): Boolean = runCatching {
-        val root = Instances.iWindowManager.getObject("mRoot") ?: return@runCatching false
-        @Suppress("UNCHECKED_CAST")
-        val displays = root.getObject("mChildren") as? List<Any> ?: return@runCatching false
-        val display = displays.firstOrNull { it.getObjectAs<Int>("mDisplayId") == displayId }
-            ?: return@runCatching false
-        val focus = display.getObject("mCurrentFocus") ?: return@runCatching false
-        focus.getObjectAs<Int>("mRequestedVisibleTypes") and IME_TYPE != 0
-    }.onFailure { Log.w(TAG, "cannot read the keyboard request of display $displayId", it) }
-        .getOrDefault(false)
-
-    /** Asks the input method service to draw the keyboard for its current client. */
-    private fun showTabletKeyboard() {
-        val service = immService
-        // A show entry point that returns false declines the request, so the next one is tried; one
-        // that returns nothing has taken it.
-        val shown = service != null &&
-                invokeFirst(showMethods, service, null) { it as? Boolean ?: true }
-        if (!shown) Log.w(TAG, "cannot ask for the tablet keyboard")
     }
 
     /**

@@ -1400,42 +1400,9 @@ class AppWindow(
             showBackGesturesBriefly()
             forwardMotionEvent(event)
             moveToTopIfNeed(event)
-            trackTapForKeyboard(event)
             return true
         }
     }
-
-    /**
-     * Hands a plain tap to the keyboard bridge.
-     *
-     * The app cannot ask for the tablet keyboard again by itself on one of our displays, so a tap
-     * is what brings it back after the user closed it. Drags and long presses belong to the window
-     * and the app, not to the keyboard.
-     */
-    private fun trackTapForKeyboard(event: MotionEvent) {
-        // This runs for every touch that reaches the window, so it must cost nothing while the
-        // keyboard is up: that single flag read is the whole cost then.
-        if (!ImeVisibilityBridge.waitsForTap) return
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                tapDownX = event.x
-                tapDownY = event.y
-            }
-
-            MotionEvent.ACTION_UP -> {
-                val slop = 16.dpToPx()
-                val moved = (event.x - tapDownX) * (event.x - tapDownX) +
-                        (event.y - tapDownY) * (event.y - tapDownY)
-                if (moved <= slop * slop) {
-                    runCatching { ImeVisibilityBridge.onWindowTapped(displayId) }
-                        .onFailure { Log.d(TAG, "cannot bring the keyboard back", it) }
-                }
-            }
-        }
-    }
-
-    private var tapDownX = 0f
-    private var tapDownY = 0f
 
     inner class SurfaceOnGenericMotionListener : View.OnGenericMotionListener {
         override fun onGenericMotion(v: View, event: MotionEvent): Boolean {
