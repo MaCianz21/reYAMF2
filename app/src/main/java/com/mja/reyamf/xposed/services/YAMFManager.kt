@@ -63,6 +63,9 @@ object YAMFManager : IYAMFManager.Stub() {
     private const val ACTION_OPEN_APP_LIST = "com.mja.reyamf.action.OPEN_APP_LIST"
     const val ACTION_OPEN_IN_YAMF = "com.mja.reyamf.ACTION_OPEN_IN_YAMF"
 
+    /** How long after using a window a taskbar back press still belongs to it. */
+    private const val BACK_PRESS_USE_MS = 60_000L
+
     const val EXTRA_COMPONENT_NAME = "componentName"
     const val EXTRA_USER_ID = "userId"
     const val EXTRA_TASK_ID = "taskId"
@@ -81,6 +84,9 @@ object YAMFManager : IYAMFManager.Stub() {
     /** Display of the window the user interacted with last, or -1 when there is none. */
     @Volatile
     private var activeDisplayId = -1
+
+    /** When each window was last used, keyed by the virtual display it hosts. */
+    private val lastUseAt = ConcurrentHashMap<Int, Long>()
 
     /**
      * A default value keeps early calls (app queried the config before systemReady) from
@@ -183,6 +189,7 @@ object YAMFManager : IYAMFManager.Stub() {
 
     fun removeWindow(id: Int) {
         windowsByDisplay.remove(id)
+        lastUseAt.remove(id)
         if (activeDisplayId == id) activeDisplayId = -1
         ImeVisibilityBridge.onDisplayLost(id)
         if (windows.remove(id)) notifyOpenCount()
@@ -191,9 +198,30 @@ object YAMFManager : IYAMFManager.Stub() {
     /** True when [displayId] hosts one of the floating windows. */
     fun hostsWindow(displayId: Int): Boolean = windowsByDisplay.containsKey(displayId)
 
-    /** Remembers which window the navigation bar buttons must act on. */
-    fun onWindowFocused(displayId: Int) {
-        if (windowsByDisplay.containsKey(displayId)) activeDisplayId = displayId
+    /** The floating window hosted on [displayId], or null when none is open there. */
+    fun windowOf(displayId: Int): AppWindow? = windowsByDisplay[displayId]
+
+    /** Remembers which window the navigation bar buttons must act on, and when it was used. */
+    fun onWindowUsed(displayId: Int) {
+        if (!windowsByDisplay.containsKey(displayId)) return
+        activeDisplayId = displayId
+        lastUseAt[displayId] = SystemClock.uptimeMillis()
+    }
+
+    /**
+     * The window a back press from the tablet's taskbar should navigate, if any.
+     *
+     * The taskbar's back button is not a key press: it asks the system to navigate back, and the
+     * system hands that to the top task of the default display, which is where a floating window
+     * is drawn but not where its app runs. The press belongs to the window only while the user is
+     * working in it, so a window used within the last [BACK_PRESS_USE_MS] answers it, and a press
+     * after the user moved on to another app is left to that app.
+     */
+    fun windowForBackPress(): AppWindow? {
+        val window = activeWindow() ?: return null
+        if (!window.canReceiveKeys) return null
+        val usedAt = lastUseAt[window.displayId] ?: return null
+        return window.takeIf { SystemClock.uptimeMillis() - usedAt < BACK_PRESS_USE_MS }
     }
 
     /**

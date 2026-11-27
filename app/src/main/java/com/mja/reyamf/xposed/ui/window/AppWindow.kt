@@ -138,6 +138,8 @@ class AppWindow(
     private var originalWidth: Int = 0
     private var originalHeight: Int = 0
     private var isResize: Boolean = true
+    /** Height the keyboard shortened the window to, restored when it goes; 0 when it did not. */
+    private var heightBeforeKeyboard = 0
     private var orientation = 0
     private var params = WindowManager.LayoutParams()
     /** Cached top inset; cleared on rotation, where the status bar height can change. */
@@ -741,6 +743,74 @@ class AppWindow(
             .onFailure { Log.d(TAG, "cannot move the window", it) }
     }
 
+    /**
+     * The tablet's keyboard came up or went away.
+     *
+     * The keyboard is drawn on the tablet display, over the bottom of the screen, so a window that
+     * reaches into that area has its app laid out behind the keyboard: the field the user tapped
+     * ends up under it and cannot be seen while typing. The window steps out of the way whenever
+     * the keyboard appears and takes its size back when it goes.
+     */
+    fun onTabletKeyboardChanged(shown: Boolean) {
+        if (isDestroyed || !::binding.isInitialized) return
+        binding.root.post {
+            if (isDestroyed) return@post
+            val top = if (shown) ImeVisibilityBridge.tabletKeyboardTop() else 0
+            fitAboveKeyboard(if (top > 0) screenHeight() - top else 0)
+        }
+    }
+
+    /**
+     * Keeps the window out of the keyboard's way: moved up while there is room above it, and
+     * shortened to the room that is left when there is not, so the app inside lays itself out above
+     * the keyboard the way it would in a full screen app.
+     */
+    private fun fitAboveKeyboard(ime: Int) {
+        if (isDestroyed || !::binding.isInitialized || isMini || isCollapsed) return
+        if (ime <= 0) {
+            val restore = heightBeforeKeyboard
+            if (restore > 0) {
+                heightBeforeKeyboard = 0
+                resizeWindowSurface(restore)
+            }
+            return
+        }
+        val params = binding.root.layoutParams as? WindowManager.LayoutParams ?: return
+        val surfaceHeight = surfaceView.layoutParams.height
+        if (surfaceHeight <= 0) return
+        // Measured against the window's full height, so being told about the keyboard again,
+        // as it animates in, lands on the same height instead of shortening it twice.
+        val fullSurface = heightBeforeKeyboard.takeIf { it > 0 } ?: surfaceHeight
+        val chrome = (binding.root.height - surfaceHeight).coerceAtLeast(0)
+        val location = IntArray(2)
+        binding.root.getLocationOnScreen(location)
+        var covered = location[1] + fullSurface + chrome - (screenHeight() - ime)
+        if (covered <= 0) return
+        val lift = minOf(covered, (params.y - minWindowY()).coerceAtLeast(0))
+        if (lift > 0) {
+            params.y -= lift
+            updateWindowLayout(params)
+            positionBubble()
+            covered -= lift
+        }
+        if (covered <= 0) return
+        // There is no room above the window: shorten it, and the display with it, so the app
+        // relayouts above the keyboard.
+        val target = (fullSurface - covered).coerceAtLeast(150.dpToPx().toInt())
+        Log.i(TAG, "shortening the window to $target to clear the keyboard")
+        if (target >= fullSurface) return
+        heightBeforeKeyboard = fullSurface
+        resizeWindowSurface(target)
+    }
+
+    /** Gives the window's app a new height, which resizes its display the same way a drag does. */
+    private fun resizeWindowSurface(height: Int) {
+        if (surfaceView.layoutParams.height == height) return
+        isResize = true
+        surfaceView.updateLayoutParams { this.height = height }
+        binding.vSizePreviewer.updateLayoutParams { this.height = height }
+    }
+
     /** Brings a resized or minimised window back into view. */
     private fun ensureWindowVisible() {
         if (isDestroyed || !::binding.isInitialized) return
@@ -1287,7 +1357,7 @@ class AppWindow(
 
     /** Records this window as the target of the navigation bar buttons. */
     private fun markActiveWindow() {
-        if (displayId > 0) YAMFManager.onWindowFocused(displayId)
+        if (displayId > 0) YAMFManager.onWindowUsed(displayId)
     }
 
     /**
@@ -1351,6 +1421,7 @@ class AppWindow(
                 invokeMethod("setDisplayId", args(displayId), argTypes(Integer.TYPE))
             }
             runCatching { Instances.inputManager.injectInputEvent(event, 0) }
+                .onSuccess { if (!it) Log.d(TAG, "display $displayId did not take key $keyCode") }
                 .onFailure { Log.d(TAG, "cannot send key $keyCode to the window", it) }
         }
     }
@@ -1400,6 +1471,12 @@ class AppWindow(
             showBackGesturesBriefly()
             forwardMotionEvent(event)
             moveToTopIfNeed(event)
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                // A tap that does not ask for the keyboard again is the user leaving the field.
+                // The app's own hide never reaches the keyboard drawn on the tablet display, so
+                // it is closed here instead of staying up over the window.
+                ImeVisibilityBridge.onWindowTapped(displayId)
+            }
             return true
         }
     }

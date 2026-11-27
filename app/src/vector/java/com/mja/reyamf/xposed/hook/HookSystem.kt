@@ -41,6 +41,7 @@ object HookSystem {
         hookSystemBroadcastChecks(classLoader)
         hookInputFocus(module, classLoader)
         hookInjectedInput(module, classLoader)
+        hookTaskbarBack(module, classLoader)
         hookImeVisibility(module, classLoader)
     }
 
@@ -174,6 +175,33 @@ object HookSystem {
     }
 
     /**
+     * Takes the tablet taskbar's back button before the system navigates back.
+     *
+     * That button is not a key press: Launcher asks the system to navigate back, and the system
+     * navigates the top task of the default display, which is the app drawn behind a floating
+     * window instead of the window's own app. Claiming the call here keeps a press the user made
+     * while working in a window inside that window (see [NavKeyRouter.onBackPressed]).
+     */
+    private fun hookTaskbarBack(module: XposedModule, classLoader: ClassLoader) {
+        runCatching {
+            val taskManager =
+                loadClass("com.android.server.wm.ActivityTaskManagerService", classLoader)
+            val startBack = taskManager.findMethod { name == "startBackNavigation" }
+            deoptimize(module, startBack)
+            startBack.createHook {
+                before { param ->
+                    runCatching {
+                        // A null navigation info leaves the caller nothing to animate or to
+                        // navigate, which is what claims the press.
+                        if (NavKeyRouter.onBackPressed()) param.result = null
+                    }.onFailure { log(TAG, "cannot route the taskbar back button", it) }
+                }
+            }
+            log(TAG, "hooked ActivityTaskManagerService.startBackNavigation")
+        }.onFailure { log(TAG, "cannot hook the taskbar back button", it) }
+    }
+
+    /**
      * Keeps the tablet's own keyboard up for an app on a window's display.
      *
      * The fallback IME policy draws the keyboard on the tablet, but the framework reads the app's
@@ -202,10 +230,12 @@ object HookSystem {
                             before { param ->
                                 runCatching {
                                     ImeVisibilityBridge.attachService(param.thisObject)
+                                    // A window token names the window a request is for, in the
+                                    // show entry points and in the app's own hide alike.
+                                    val token =
+                                        param.args.firstOrNull { it is IBinder } as? IBinder
                                     when {
                                         methodName in showMethods -> {
-                                            val token =
-                                                param.args.firstOrNull { it is IBinder } as? IBinder
                                             if (ImeVisibilityBridge.dropsShowRequest(token)) {
                                                 param.result = false
                                             } else if (ImeVisibilityBridge.alreadyShown(
@@ -220,14 +250,17 @@ object HookSystem {
                                             }
                                         }
 
-                                        // The app itself is done typing.
+                                        // The app itself is done typing: the fallback display
+                                        // drew the keyboard elsewhere, so its own hide closes
+                                        // nothing unless it is repeated for the tablet keyboard.
                                         methodName == ImeVisibilityBridge.CLIENT_HIDE ->
-                                            ImeVisibilityBridge.onHideRequested()
+                                            ImeVisibilityBridge.onClientHideRequested(token)
 
                                         // The server hides the keyboard because it believes
                                         // the app withdrew the request, which is the
-                                        // misunderstanding these hooks exist for.
-                                        ImeVisibilityBridge.keepsTabletKeyboard ->
+                                        // misunderstanding these hooks exist for. A hide that
+                                        // follows the window losing its editor is the truth.
+                                        ImeVisibilityBridge.keepAnswersHide() ->
                                             param.result =
                                                 ImeVisibilityBridge.skippedHideResult(method)
                                     }
@@ -289,7 +322,7 @@ object HookSystem {
                         // The listener would take the withdrawn request to the input method
                         // service, but it carries the app's show as well: only a withdrawal is
                         // dropped while a window keeps the keyboard.
-                        if (ImeVisibilityBridge.keepsTabletKeyboard &&
+                        if (ImeVisibilityBridge.keepAnswersHide() &&
                             ImeVisibilityBridge.imeChangeWantsHide(param.args.getOrNull(0))
                         ) {
                             param.result = Unit
